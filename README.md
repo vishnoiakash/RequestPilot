@@ -28,7 +28,7 @@ A Microsoft Edge (Chromium) browser extension for intercepting and modifying HTT
 
 1. Clone the repository
    ```bash
-   git clone https://github.com/YOUR_USERNAME/RequestPilot.git
+   git clone https://github.com/vishnoiakash/RequestPilot.git
    cd RequestPilot
    ```
 
