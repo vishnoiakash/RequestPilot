@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RequestPilot</title>
+  <link rel="stylesheet" href="../assets/css/design-system.css" />
+  <link rel="stylesheet" href="../assets/css/layout.css" />
+  <link rel="stylesheet" href="../assets/css/components.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" role="navigation" aria-label="Main navigation">
+      <div class="sidebar-logo">
+        <div class="sidebar-logo-icon" aria-hidden="true">
+          <img src="../../assets/logo/request_pilot_logo.png" alt="RequestPilot" width="22" height="22" style="object-fit:contain;border-radius:4px;" />
+        </div>
+        <div class="sidebar-logo-text">
+          <span class="sidebar-logo-name">RequestPilot</span>
+          <span class="sidebar-logo-tagline">HTTP Rule Manager</span>
+        </div>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav" aria-label="Pages"></nav>
+      <div class="sidebar-footer" id="sidebar-footer"></div>
+    </aside>
+
+    <div class="main-content" role="main">
+      <header class="page-header">
+        <div class="page-header-left">
+          <h1 class="page-title" id="page-title">Dashboard</h1>
+          <p class="page-subtitle" id="page-subtitle">Overview of your rules and recent activity</p>
+        </div>
+        <div class="page-header-actions" id="page-header-actions" role="toolbar" aria-label="Page actions"></div>
+      </header>
+      <div class="page-body" id="main-content"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

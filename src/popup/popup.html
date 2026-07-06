@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RequestPilot</title>
+  <link rel="stylesheet" href="../assets/css/design-system.css" />
+  <link rel="stylesheet" href="../assets/css/components.css" />
+  <style>
+    body {
+      width: 360px;
+      min-height: 240px;
+      overflow: hidden;
+      padding: 0;
+    }
+
+    .popup-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-surface);
+    }
+
+    .popup-logo {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    .popup-title {
+      flex: 1;
+    }
+
+    .popup-title h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      line-height: 1.2;
+    }
+
+    .popup-title p {
+      font-size: 11px;
+      color: var(--color-text-tertiary);
+    }
+
+    .popup-body {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .popup-master-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: var(--color-bg);
+      border-radius: 10px;
+      border: 1px solid var(--color-border);
+    }
+
+    .popup-master-toggle-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--color-text-primary);
+    }
+
+    .popup-master-toggle-sub {
+      font-size: 11px;
+      color: var(--color-text-tertiary);
+    }
+
+    .env-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .env-row label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-text-secondary);
+      white-space: nowrap;
+    }
+
+    .env-row select {
+      flex: 1;
+      height: 32px;
+      font-size: 12px;
+    }
+
+    .rule-counts {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .rule-count-card {
+      background: var(--color-bg);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 8px;
+      text-align: center;
+    }
+
+    .rule-count-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--color-text-primary);
+      line-height: 1.2;
+    }
+
+    .rule-count-label {
+      font-size: 10px;
+      color: var(--color-text-tertiary);
+      margin-top: 2px;
+    }
+
+    .popup-footer {
+      padding: 12px 16px;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .popup-footer .btn {
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="popup-header">
+    <div class="popup-logo" aria-hidden="true">
+      <img src="../../assets/logo/request_pilot_logo.png" alt="RequestPilot" width="22" height="22" style="object-fit:contain;border-radius:4px;" />
+    </div>
+    <div class="popup-title">
+      <h1>RequestPilot</h1>
+      <p id="popup-version">v1.0.0</p>
+    </div>
+  </div>
+
+  <div class="popup-body">
+    <!-- Master toggle -->
+    <div class="popup-master-toggle">
+      <div>
+        <div class="popup-master-toggle-label">Extension Active</div>
+        <div class="popup-master-toggle-sub" id="master-status">All rules are running</div>
+      </div>
+      <label class="toggle" aria-label="Enable or disable all rules">
+        <input type="checkbox" id="master-toggle" checked />
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </label>
+    </div>
+
+    <!-- Environment selector -->
+    <div class="env-row">
+      <label for="env-select">Environment</label>
+      <select class="select" id="env-select"></select>
+    </div>
+
+    <!-- Rule counts -->
+    <div class="rule-counts">
+      <div class="rule-count-card">
+        <div class="rule-count-value" id="count-headers">0</div>
+        <div class="rule-count-label">Headers</div>
+      </div>
+      <div class="rule-count-card">
+        <div class="rule-count-value" id="count-redirects">0</div>
+        <div class="rule-count-label">Redirects</div>
+      </div>
+      <div class="rule-count-card">
+        <div class="rule-count-value" id="count-mocks">0</div>
+        <div class="rule-count-label">Mocks</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="popup-footer">
+    <button class="btn btn-primary" id="btn-open-settings">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      Open Settings
+    </button>
+  </div>
+
+  <script type="module" src="./popup.js"></script>
+</body>
+</html>

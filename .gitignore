@@ -1,0 +1,30 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/settings.json
+.vscode/*.log
+*.suo
+*.user
+
+# Kiro internal
+.kiro/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment / secrets — never commit these
+.env
+.env.*
+secrets.*

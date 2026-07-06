@@ -1,0 +1,22 @@
+{
+  "name": "requestpilot",
+  "version": "1.0.0",
+  "description": "Microsoft Edge extension for modifying HTTP requests and responses",
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "watch": "tsc --watch",
+    "dev": "tsc && node scripts/copy-assets.js"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.2",
+    "typescript": "^5.4.5"
+  },
+  "keywords": [
+    "browser-extension",
+    "http",
+    "headers",
+    "edge",
+    "chrome"
+  ],
+  "license": "MIT"
+}
