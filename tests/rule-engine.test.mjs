@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildDnrRules } from '../dist/background/ruleEngine.js';
+import {
+  createDefaultEnvironments,
+  createDefaultRules,
+  POLICYBAZAAR_URL_REGEX,
+} from '../dist/models/sampleData.js';
 import { validateExportSchema, validateRule } from '../dist/validation/schema.js';
 import {
   matchesUrlPattern,
@@ -118,4 +123,43 @@ test('import validation rejects duplicate IDs and malformed environments', () =>
   });
   assert.equal(result.valid, false);
   assert.match(result.errors.join(' '), /duplicate/i);
+});
+
+test('first-install defaults contain the requested environments and variables', () => {
+  const environments = createDefaultEnvironments();
+  assert.deepEqual(environments.map((environment) => environment.name), [
+    'NONE', 'QA', 'PROD', 'BUILD',
+  ]);
+  assert.equal(environments.find((environment) => environment.name === 'NONE').isActive, true);
+  assert.equal(environments.find((environment) => environment.name === 'NONE').variables.length, 0);
+  assert.equal(environments.find((environment) => environment.name === 'QA').variables[0].key, 'API_KEY');
+  assert.equal(environments.find((environment) => environment.name === 'PROD').variables[0].key, 'API_KEY');
+  assert.deepEqual(environments.find((environment) => environment.name === 'BUILD').variables[0], {
+    key: 'HEALTH_BUILD',
+    value: '1',
+    description: 'Health build header value.',
+  });
+});
+
+test('PolicyBazaar defaults apply only in their selected environments', () => {
+  const rules = createDefaultRules();
+  const environments = createDefaultEnvironments();
+  const none = environments.find((environment) => environment.name === 'NONE');
+  const qa = environments.find((environment) => environment.name === 'QA');
+  const prod = environments.find((environment) => environment.name === 'PROD');
+  const build = environments.find((environment) => environment.name === 'BUILD');
+
+  assert.equal(matchesUrlPattern(
+    POLICYBAZAAR_URL_REGEX,
+    true,
+    'https://health.policybazaar.com/api/check?source=test'
+  ), true);
+  assert.equal(buildDnrRules(rules, none).length, 0);
+  assert.equal(buildDnrRules(rules, qa).length, 1);
+  assert.equal(buildDnrRules(rules, prod).length, 1);
+  assert.equal(buildDnrRules(rules, build).length, 1);
+  assert.equal(
+    buildDnrRules(rules, build)[0].action.requestHeaders[0].value,
+    '1'
+  );
 });

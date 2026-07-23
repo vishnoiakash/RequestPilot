@@ -1,12 +1,17 @@
 import type { AnyRule, Environment, Settings, HistoryEntry, ExportSchema } from '../models/types.js';
 import { STORAGE_KEYS } from '../models/types.js';
+import {
+  createDefaultEnvironments,
+  createDefaultRules,
+  DEFAULT_ENVIRONMENT_IDS,
+} from '../models/sampleData.js';
 import { asExportSchema } from '../validation/schema.js';
 
 // ============================================================
 // Default Settings — used on first install and after reset
 // ============================================================
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
@@ -42,7 +47,7 @@ export class StorageService {
       STORAGE_KEYS.SCHEMA_VERSION,
     ]);
     if (!result[STORAGE_KEYS.INITIALIZED]) {
-      await this.initEmpty();
+      await this.initDefaults();
       await chrome.storage.local.set({
         [STORAGE_KEYS.INITIALIZED]: true,
         [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
@@ -52,10 +57,10 @@ export class StorageService {
     await this.migrate(Number(result[STORAGE_KEYS.SCHEMA_VERSION] ?? 1));
   }
 
-  private async initEmpty(): Promise<void> {
+  private async initDefaults(): Promise<void> {
     await chrome.storage.local.set({
-      [STORAGE_KEYS.RULES]:        [],
-      [STORAGE_KEYS.ENVIRONMENTS]: [],
+      [STORAGE_KEYS.RULES]:        createDefaultRules(),
+      [STORAGE_KEYS.ENVIRONMENTS]: createDefaultEnvironments(),
       [STORAGE_KEYS.HISTORY]:      [],
       [STORAGE_KEYS.USAGE]:        {},
     });
@@ -81,8 +86,66 @@ export class StorageService {
       await this.writeRules(rules);
       await chrome.storage.local.set({ [STORAGE_KEYS.USAGE]: usage });
     }
+    if (fromVersion < 4) {
+      await this.seedTeamDefaults();
+    }
     await chrome.storage.local.set({
       [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
+    });
+  }
+
+  private async seedTeamDefaults(): Promise<void> {
+    const [rules, environments] = await Promise.all([
+      this.getRules(),
+      this.getEnvironments(),
+    ]);
+    const resolvedIds: Record<keyof typeof DEFAULT_ENVIRONMENT_IDS, string> = {
+      ...DEFAULT_ENVIRONMENT_IDS,
+    };
+
+    for (const defaultEnvironment of createDefaultEnvironments()) {
+      const existing = environments.find(
+        (environment) => environment.name.trim().toUpperCase() === defaultEnvironment.name
+      );
+      if (!existing) {
+        environments.push({
+          ...defaultEnvironment,
+          isActive: environments.length === 0 && defaultEnvironment.name === 'NONE',
+        });
+        continue;
+      }
+
+      const key = defaultEnvironment.name.toLowerCase() as keyof typeof resolvedIds;
+      resolvedIds[key] = existing.id;
+      for (const variable of defaultEnvironment.variables) {
+        if (!existing.variables.some((candidate) => candidate.key === variable.key)) {
+          existing.variables.push({ ...variable });
+        }
+      }
+    }
+
+    for (const defaultRule of createDefaultRules(resolvedIds)) {
+      const headerName = defaultRule.type === 'header'
+        ? defaultRule.headers[0]?.name.toLowerCase()
+        : '';
+      const existing = rules.find((rule) =>
+        rule.type === 'header' &&
+        rule.headers.some((header) => header.name.toLowerCase() === headerName)
+      );
+      if (existing?.type === 'header' && defaultRule.type === 'header') {
+        existing.urlMatcher = { ...defaultRule.urlMatcher };
+        existing.environmentIds = [...(defaultRule.environmentIds ?? [])];
+        existing.target = 'request';
+        existing.headers = defaultRule.headers.map((header) => ({ ...header }));
+        existing.updatedAt = new Date().toISOString();
+      } else {
+        rules.push(defaultRule);
+      }
+    }
+
+    await this.writeRules(rules);
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.ENVIRONMENTS]: environments,
     });
   }
 
@@ -324,7 +387,7 @@ export class StorageService {
   async resetToDefaults(): Promise<void> {
     await chrome.storage.local.clear();
     await chrome.storage.sync.clear();
-    await this.initEmpty();
+    await this.initDefaults();
     await chrome.storage.local.set({
       [STORAGE_KEYS.INITIALIZED]: true,
       [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
