@@ -24,16 +24,14 @@ import type {
   ResourceType,
   HttpMethod,
 } from '../models/types.js';
+import { validateRule } from '../validation/schema.js';
 
 // ============================================================
 // Constants
 // ============================================================
 
-/** Base ID offset so DNR rule IDs never clash with 0. */
 const DNR_ID_BASE = 1000;
-
-/** Max dynamic rules allowed by Chrome/Edge (currently 30 000). */
-const MAX_DYNAMIC_RULES = 30000;
+const MAX_DNR_ID = 2_147_483_647;
 
 // ============================================================
 // Helpers
@@ -65,7 +63,12 @@ function toDnrResourceTypes(
   if (types.includes('*') || types.length === 0) return all;
   return types
     .filter((t) => t !== '*')
-    .map((t) => t as chrome.declarativeNetRequest.ResourceType);
+    .flatMap((t) => {
+      if (t === 'document') {
+        return ['main_frame', 'sub_frame'] as chrome.declarativeNetRequest.ResourceType[];
+      }
+      return [t as chrome.declarativeNetRequest.ResourceType];
+    });
 }
 
 /**
@@ -79,10 +82,9 @@ function toUrlFilter(
   if (!pattern || pattern === '*') return {};
   if (isRegex) return { regexFilter: pattern };
 
-  // Convert simple glob (* wildcard) to DNR urlFilter syntax.
-  // DNR urlFilter: | anchors, * wildcard — already compatible with
-  // common patterns like "https://api.example.com/*"
-  return { urlFilter: pattern };
+  // The UI exposes glob semantics, so anchor both ends to keep browser DNR
+  // matching consistent with the editor test tool and mock interceptor.
+  return { urlFilter: `|${pattern}|` };
 }
 
 /**
@@ -102,13 +104,32 @@ function toRequestMethods(
  * Stable numeric ID for a rule string ID.
  * Hashes the string into a positive integer in [DNR_ID_BASE, MAX_DYNAMIC_RULES).
  */
-function stableId(ruleId: string, subIndex = 0): number {
+function hashedId(ruleId: string): number {
   let hash = 0;
   for (let i = 0; i < ruleId.length; i++) {
     hash = (Math.imul(31, hash) + ruleId.charCodeAt(i)) | 0;
   }
-  const base = (Math.abs(hash) % (MAX_DYNAMIC_RULES - DNR_ID_BASE - 100)) + DNR_ID_BASE;
-  return base + subIndex;
+  return (Math.abs(hash) % (MAX_DNR_ID - DNR_ID_BASE)) + DNR_ID_BASE;
+}
+
+function resolveRuleValue<T>(value: T, env: Environment | null): T {
+  if (typeof value === 'string') return resolve(value, env) as T;
+  if (Array.isArray(value)) return value.map((item) => resolveRuleValue(item, env)) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, resolveRuleValue(item, env)])
+    ) as T;
+  }
+  return value;
+}
+
+function allocateDnrId(ruleId: string, used: Set<number>): number {
+  let candidate = hashedId(ruleId);
+  while (used.has(candidate)) {
+    candidate = candidate >= MAX_DNR_ID ? DNR_ID_BASE : candidate + 1;
+  }
+  used.add(candidate);
+  return candidate;
 }
 
 // ============================================================
@@ -117,15 +138,17 @@ function stableId(ruleId: string, subIndex = 0): number {
 
 function headerRuleToDnr(
   rule: HeaderRule,
-  env: Environment | null
+  env: Environment | null,
+  id: number
 ): chrome.declarativeNetRequest.Rule[] {
   const requestHeaders: chrome.declarativeNetRequest.ModifyHeaderInfo[] = [];
   const responseHeaders: chrome.declarativeNetRequest.ModifyHeaderInfo[] = [];
 
   for (const op of rule.headers) {
     const value = resolve(op.value, env);
+    const headerName = resolve(op.name, env);
     const entry: chrome.declarativeNetRequest.ModifyHeaderInfo = {
-      header: op.name,
+      header: op.operation === 'append' ? headerName.toLowerCase() : headerName,
       operation: op.operation as chrome.declarativeNetRequest.HeaderOperation,
       ...(op.operation !== 'remove' ? { value } : {}),
     };
@@ -153,7 +176,7 @@ function headerRuleToDnr(
   };
 
   return [{
-    id: stableId(rule.id),
+    id,
     priority: rule.priority,
     condition,
     action,
@@ -162,7 +185,8 @@ function headerRuleToDnr(
 
 function redirectRuleToDnr(
   rule: RedirectRule,
-  env: Environment | null
+  env: Environment | null,
+  id: number
 ): chrome.declarativeNetRequest.Rule[] {
   const redirectUrl = resolve(rule.redirectUrl, env);
   if (!redirectUrl) return [];
@@ -177,13 +201,14 @@ function redirectRuleToDnr(
 
   // If the redirect URL contains a wildcard or regex group reference,
   // use regexSubstitution; otherwise use a plain redirect.
-  const hasBackref = redirectUrl.includes('\\1') || redirectUrl.includes('$1');
+  const hasBackref = /(?:\\|\$)\d/.test(redirectUrl);
+  const regexSubstitution = redirectUrl.replace(/\$(\d)/g, '\\$1');
   const action: chrome.declarativeNetRequest.RuleAction = hasBackref
-    ? { type: 'redirect', redirect: { regexSubstitution: redirectUrl } }
+    ? { type: 'redirect', redirect: { regexSubstitution } }
     : { type: 'redirect', redirect: { url: redirectUrl } };
 
   return [{
-    id: stableId(rule.id),
+    id,
     priority: rule.priority,
     condition,
     action,
@@ -192,7 +217,8 @@ function redirectRuleToDnr(
 
 function queryParamRuleToDnr(
   rule: QueryParamRule,
-  env: Environment | null
+  env: Environment | null,
+  id: number
 ): chrome.declarativeNetRequest.Rule[] {
   // Build the queryTransform object
   const addOrReplaceParams: chrome.declarativeNetRequest.QueryKeyValue[] = [];
@@ -233,7 +259,7 @@ function queryParamRuleToDnr(
   };
 
   return [{
-    id: stableId(rule.id),
+    id,
     priority: rule.priority,
     condition,
     action,
@@ -242,7 +268,8 @@ function queryParamRuleToDnr(
 
 function cookieRuleToDnr(
   rule: CookieRule,
-  env: Environment | null
+  env: Environment | null,
+  id: number
 ): chrome.declarativeNetRequest.Rule[] {
   // Cookie rules map to modifyHeaders on the Cookie (request) header.
   // Each set/remove operation is a separate header modification entry.
@@ -256,7 +283,7 @@ function cookieRuleToDnr(
     if (op.operation === 'set') {
       // Append to Cookie header: "name=value"
       requestHeaders.push({
-        header: 'Cookie',
+        header: 'cookie',
         operation: 'append',
         value: `${name}=${value}`,
       });
@@ -267,7 +294,7 @@ function cookieRuleToDnr(
       // Best effort: append an empty override so it's documented.
       // Real removal requires content script interception.
       requestHeaders.push({
-        header: 'Cookie',
+        header: 'cookie',
         operation: 'remove',
       });
     }
@@ -284,7 +311,7 @@ function cookieRuleToDnr(
   };
 
   return [{
-    id: stableId(rule.id),
+    id,
     priority: rule.priority,
     condition,
     action: { type: 'modifyHeaders', requestHeaders },
@@ -304,22 +331,25 @@ export function buildDnrRules(
   env: Environment | null
 ): chrome.declarativeNetRequest.Rule[] {
   const dnrRules: chrome.declarativeNetRequest.Rule[] = [];
+  const usedIds = new Set<number>();
 
   for (const rule of rules) {
     if (!rule.enabled) continue;
+    if (!validateRule(rule).valid) continue;
+    const id = allocateDnrId(rule.id, usedIds);
 
     switch (rule.type) {
       case 'header':
-        dnrRules.push(...headerRuleToDnr(rule, env));
+        dnrRules.push(...headerRuleToDnr(rule, env, id));
         break;
       case 'redirect':
-        dnrRules.push(...redirectRuleToDnr(rule, env));
+        dnrRules.push(...redirectRuleToDnr(rule, env, id));
         break;
       case 'queryParam':
-        dnrRules.push(...queryParamRuleToDnr(rule, env));
+        dnrRules.push(...queryParamRuleToDnr(rule, env, id));
         break;
       case 'cookie':
-        dnrRules.push(...cookieRuleToDnr(rule, env));
+        dnrRules.push(...cookieRuleToDnr(rule, env, id));
         break;
       // mock and responseOverride handled by content script
     }
@@ -352,7 +382,49 @@ export async function applyDnrRules(
       return { applied: 0, errors: [] };
     }
 
-    const dnrRules = buildDnrRules(rules, env);
+    const validRules: AnyRule[] = [];
+    for (const rule of rules) {
+      if (!rule.enabled || rule.type === 'mock' || rule.type === 'responseOverride') {
+        validRules.push(rule);
+        continue;
+      }
+      const validation = validateRule(rule);
+      if (!validation.valid) {
+        errors.push(`${rule.name}: ${validation.errors.join(' ')}`);
+        continue;
+      }
+      const resolvedRule = resolveRuleValue(rule, env);
+      if (/\{\{\w+\}\}/.test(JSON.stringify(resolvedRule))) {
+        errors.push(`${rule.name}: one or more environment variables are unresolved.`);
+        continue;
+      }
+      const resolvedValidation = validateRule(resolvedRule);
+      if (!resolvedValidation.valid) {
+        errors.push(`${rule.name}: ${resolvedValidation.errors.join(' ')}`);
+        continue;
+      }
+      if (resolvedRule.urlMatcher.isRegex && chrome.declarativeNetRequest.isRegexSupported) {
+        const supported = await chrome.declarativeNetRequest.isRegexSupported({
+          regex: resolvedRule.urlMatcher.pattern,
+        });
+        if (!supported.isSupported) {
+          errors.push(`${rule.name}: unsupported regular expression (${supported.reason ?? 'unknown reason'}).`);
+          continue;
+        }
+      }
+      validRules.push(resolvedRule);
+    }
+
+    const contentRules = validRules.filter((rule) =>
+      rule.type === 'mock' || rule.type === 'responseOverride'
+    );
+    const networkRules = validRules
+      .filter((rule) => rule.type !== 'mock' && rule.type !== 'responseOverride')
+      .sort((a, b) => b.priority - a.priority);
+    if (networkRules.length > 5000) {
+      errors.push('Only the 5,000 highest-priority browser-network rules were activated.');
+    }
+    const dnrRules = buildDnrRules([...networkRules.slice(0, 5000), ...contentRules], env);
 
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: removeIds,

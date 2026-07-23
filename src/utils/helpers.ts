@@ -94,13 +94,25 @@ export function findUnresolvedVariables(text: string, env: Environment | null): 
 // Theme helpers
 // ============================================================
 
+let activeTheme: 'light' | 'dark' | 'system' = 'system';
+let systemThemeListenerReady = false;
+
 export function applyTheme(theme: 'light' | 'dark' | 'system'): void {
+  activeTheme = theme;
   const root = document.documentElement;
   if (theme === 'system') {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     root.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
   } else {
     root.setAttribute('data-theme', theme);
+  }
+  if (!systemThemeListenerReady) {
+    systemThemeListenerReady = true;
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
+      if (activeTheme === 'system') {
+        document.documentElement.setAttribute('data-theme', event.matches ? 'dark' : 'light');
+      }
+    });
   }
 }
 
@@ -164,7 +176,8 @@ export function escapeHtml(str: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 // ============================================================

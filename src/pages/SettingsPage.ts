@@ -1,6 +1,6 @@
 import type { Settings, Environment } from '../models/types.js';
 import { Icons } from '../utils/icons.js';
-import { applyTheme } from '../utils/helpers.js';
+import { applyTheme, escapeHtml } from '../utils/helpers.js';
 import { showConfirm } from '../components/Modal.js';
 import { toast } from '../components/Toast.js';
 
@@ -8,8 +8,10 @@ interface SettingsPageOptions {
   settings: Settings;
   environments: Environment[];
   version: string;
-  onSave: (settings: Settings) => void;
-  onReset: () => void;
+  hasAutoBackup: boolean;
+  onSave: (settings: Settings) => Promise<void>;
+  onReset: () => Promise<void>;
+  onRestore: () => Promise<void>;
 }
 
 export function renderSettingsPage(opts: SettingsPageOptions): HTMLElement {
@@ -54,14 +56,14 @@ export function renderSettingsPage(opts: SettingsPageOptions): HTMLElement {
             <label class="input-label" for="default-env">Default Environment</label>
             <select id="default-env" class="select">
               <option value="">None</option>
-              ${opts.environments.map((e) => `<option value="${e.id}" ${s.defaultEnvironmentId === e.id ? 'selected' : ''}>${e.name}</option>`).join('')}
+              ${opts.environments.map((e) => `<option value="${escapeHtml(e.id)}" ${s.defaultEnvironmentId === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`).join('')}
             </select>
             <span class="input-hint">The environment activated on extension startup.</span>
           </div>
           <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--space-3) 0">
             <div>
               <div style="font-size:var(--text-sm);font-weight:var(--font-medium)">Auto Backup</div>
-              <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">Save a snapshot to local storage on every rule save</div>
+              <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">Keep a recoverable snapshot before configuration changes</div>
             </div>
             <label class="toggle">
               <input type="checkbox" id="auto-backup" ${s.autoBackup ? 'checked' : ''}/>
@@ -69,9 +71,47 @@ export function renderSettingsPage(opts: SettingsPageOptions): HTMLElement {
               <div class="toggle-thumb"></div>
             </label>
           </div>
+          <div class="settings-toggle-row">
+            <div>
+              <div style="font-size:var(--text-sm);font-weight:var(--font-medium)">Request History</div>
+              <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">Record requests matched by enabled rules</div>
+            </div>
+            <label class="toggle" aria-label="Record request history">
+              <input type="checkbox" id="history-enabled" ${s.historyEnabled ? 'checked' : ''}/>
+              <div class="toggle-track"></div><div class="toggle-thumb"></div>
+            </label>
+          </div>
+          <div class="settings-toggle-row">
+            <div>
+              <div style="font-size:var(--text-sm);font-weight:var(--font-medium)">Redact Sensitive Query Values</div>
+              <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">Hide token, password, secret, session and API-key values</div>
+            </div>
+            <label class="toggle" aria-label="Redact sensitive history values">
+              <input type="checkbox" id="redact-sensitive" ${s.redactSensitiveData ? 'checked' : ''}/>
+              <div class="toggle-track"></div><div class="toggle-thumb"></div>
+            </label>
+          </div>
+          <div class="input-group">
+            <label class="input-label" for="history-limit">History Retention</label>
+            <input id="history-limit" class="input" type="number" min="50" max="2000" step="50" value="${s.historyLimit}"/>
+            <span class="input-hint">Maximum local entries (50–2,000).</span>
+          </div>
         </div>
         <div class="card-footer">
           <button class="btn btn-primary" id="btn-save-settings">${Icons.save({ size: 14 })} Save Settings</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span style="font-weight:var(--font-semibold);display:flex;align-items:center;gap:var(--space-2)">${Icons.refreshCw({ size: 16 })} Recovery</span>
+        </div>
+        <div class="card-body settings-toggle-row">
+          <div>
+            <div style="font-size:var(--text-sm);font-weight:var(--font-medium)">Restore Last Auto-Backup</div>
+            <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">${opts.hasAutoBackup ? 'Replace rules and environments with the latest snapshot.' : 'No auto-backup is available yet.'}</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="btn-restore-backup" ${opts.hasAutoBackup ? '' : 'disabled'}>${Icons.refreshCw({ size: 14 })} Restore</button>
         </div>
       </div>
 
@@ -153,10 +193,39 @@ export function renderSettingsPage(opts: SettingsPageOptions): HTMLElement {
   (el.querySelector('#auto-backup') as HTMLInputElement)?.addEventListener('change', (e) => {
     s.autoBackup = (e.target as HTMLInputElement).checked;
   });
+  (el.querySelector('#history-enabled') as HTMLInputElement)?.addEventListener('change', (e) => {
+    s.historyEnabled = (e.target as HTMLInputElement).checked;
+  });
+  (el.querySelector('#redact-sensitive') as HTMLInputElement)?.addEventListener('change', (e) => {
+    s.redactSensitiveData = (e.target as HTMLInputElement).checked;
+  });
 
-  el.querySelector('#btn-save-settings')?.addEventListener('click', () => {
-    opts.onSave(s);
-    toast.success('Settings saved');
+  el.querySelector('#btn-save-settings')?.addEventListener('click', async () => {
+    const limit = Number((el.querySelector('#history-limit') as HTMLInputElement).value);
+    s.historyLimit = Math.min(2000, Math.max(50, Number.isFinite(limit) ? Math.round(limit) : 500));
+    try {
+      await opts.onSave(s);
+      toast.success('Settings saved');
+    } catch (error) {
+      toast.error('Settings could not be saved', String(error));
+    }
+  });
+
+  el.querySelector('#btn-restore-backup')?.addEventListener('click', async () => {
+    const confirmed = await showConfirm({
+      title: 'Restore Auto-Backup',
+      body: 'Current rules and environments will be replaced with the latest auto-backup.',
+      confirmLabel: 'Restore',
+      variant: 'primary',
+    });
+    if (!confirmed) return;
+    try {
+      await opts.onRestore();
+      toast.success('Auto-backup restored');
+      window.location.reload();
+    } catch (error) {
+      toast.error('Restore failed', String(error));
+    }
   });
 
   el.querySelector('#btn-reset')?.addEventListener('click', async () => {
@@ -167,9 +236,9 @@ export function renderSettingsPage(opts: SettingsPageOptions): HTMLElement {
       variant: 'danger',
     });
     if (ok) {
-      opts.onReset();
-      toast.info('Resetting…', 'The page will reload with sample data.');
-      setTimeout(() => window.location.reload(), 1500);
+      await opts.onReset();
+      toast.info('Resetting…', 'The page will reload with empty defaults.');
+      setTimeout(() => window.location.reload(), 700);
     }
   });
 

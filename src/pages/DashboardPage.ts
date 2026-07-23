@@ -1,12 +1,12 @@
 import type { AnyRule, HistoryEntry } from '../models/types.js';
 import { Icons } from '../utils/icons.js';
-import { countActiveRules, countRulesByType, formatRelativeTime, getRuleTypeBadgeClass, getRuleTypeLabel } from '../utils/helpers.js';
+import { countActiveRules, countRulesByType, escapeHtml, formatRelativeTime, getRuleTypeBadgeClass, getRuleTypeLabel } from '../utils/helpers.js';
 // Note: countRulesByType used for mock/redirect counts below
 
 export function renderDashboard(
   rules: AnyRule[],
   history: HistoryEntry[],
-  onNavigate: (page: string) => void
+  onNavigate: (page: string, createNew?: boolean) => void
 ): HTMLElement {
   const el = document.createElement('div');
   el.className = 'fade-in';
@@ -37,20 +37,20 @@ export function renderDashboard(
       ${statCard(Icons.redirect({ size: 22 }), String(redirectCount), 'Redirects', '#fee2e2', '#dc2626')}
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-6);margin-bottom:var(--space-6)">
+    <div class="dashboard-two-column">
       <!-- Quick Actions -->
       <div class="card">
         <div class="card-header">
           <span style="font-weight:var(--font-semibold)">${Icons.zap({ size: 16 })} Quick Actions</span>
         </div>
         <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-2)">
-          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="header-rules">
+          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="header-rules" data-create-new="true">
             ${Icons.plus({ size: 14 })} Add Header Rule
           </button>
-          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="redirect-rules">
+          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="redirect-rules" data-create-new="true">
             ${Icons.plus({ size: 14 })} Add Redirect Rule
           </button>
-          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="mock-api">
+          <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="mock-api" data-create-new="true">
             ${Icons.plus({ size: 14 })} Add Mock API
           </button>
           <button class="btn btn-secondary" style="justify-content:flex-start" data-nav="import-export">
@@ -68,7 +68,7 @@ export function renderDashboard(
           ${mostUsed.length ? mostUsed.map((r) => `
             <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-5);border-bottom:1px solid var(--color-border)">
               <span class="badge ${getRuleTypeBadgeClass(r.type)}">${getRuleTypeLabel(r.type)}</span>
-              <span style="flex:1;font-size:var(--text-sm);font-weight:var(--font-medium);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</span>
+              <span style="flex:1;font-size:var(--text-sm);font-weight:var(--font-medium);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.name)}</span>
               <span style="font-size:var(--text-xs);color:var(--color-text-tertiary)">${r.usageCount ?? 0}x</span>
             </div>
           `).join('') : `<div style="padding:var(--space-5);color:var(--color-text-tertiary);font-size:var(--text-sm)">No usage data yet</div>`}
@@ -89,9 +89,9 @@ export function renderDashboard(
               ${h.status === 'applied' ? Icons.check({ size: 10 }) : Icons.close({ size: 10 })}
               ${h.status}
             </span>
-            <span style="font-size:var(--text-xs);color:var(--color-text-tertiary);white-space:nowrap">${h.method}</span>
-            <span style="flex:1;font-size:var(--text-sm);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)">${h.url}</span>
-            <span style="font-size:var(--text-sm);color:var(--color-text-primary);white-space:nowrap">${h.ruleName}</span>
+            <span style="font-size:var(--text-xs);color:var(--color-text-tertiary);white-space:nowrap">${escapeHtml(h.method)}</span>
+            <span style="flex:1;font-size:var(--text-sm);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)">${escapeHtml(h.url)}</span>
+            <span style="font-size:var(--text-sm);color:var(--color-text-primary);white-space:nowrap">${escapeHtml(h.ruleName)}</span>
             <span style="font-size:var(--text-xs);color:var(--color-text-tertiary);white-space:nowrap">${formatRelativeTime(h.timestamp)}</span>
           </div>
         `).join('') : `
@@ -112,7 +112,10 @@ export function renderDashboard(
   `;
 
   el.querySelectorAll('[data-nav]').forEach((btn) => {
-    btn.addEventListener('click', () => onNavigate((btn as HTMLElement).dataset.nav!));
+    btn.addEventListener('click', () => onNavigate(
+      (btn as HTMLElement).dataset.nav!,
+      (btn as HTMLElement).dataset.createNew === 'true'
+    ));
   });
 
   return el;

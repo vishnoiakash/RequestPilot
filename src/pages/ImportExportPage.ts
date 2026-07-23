@@ -3,6 +3,7 @@ import { Icons } from '../utils/icons.js';
 import { downloadJson } from '../utils/helpers.js';
 import { showConfirm } from '../components/Modal.js';
 import { toast } from '../components/Toast.js';
+import { asExportSchema, validateExportSchema } from '../validation/schema.js';
 
 interface ImportExportOptions {
   onExport: () => Promise<ExportSchema>;
@@ -14,7 +15,7 @@ export function renderImportExportPage(opts: ImportExportOptions): HTMLElement {
   el.className = 'fade-in';
 
   el.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-6);max-width:800px">
+    <div class="transfer-grid">
       <!-- Export Card -->
       <div class="card">
         <div class="card-header">
@@ -26,6 +27,9 @@ export function renderImportExportPage(opts: ImportExportOptions): HTMLElement {
         <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3)">
           <p style="font-size:var(--text-sm);color:var(--color-text-secondary)">
             Export all rules and environment definitions to a JSON file for backup or sharing.
+          </p>
+          <p style="font-size:var(--text-xs);color:var(--color-warning)">
+            Secret environment values are included. Review the JSON before sharing it.
           </p>
           <div style="background:var(--color-bg);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-xs);font-family:var(--font-mono);color:var(--color-text-secondary)">
             { version, exportedAt, rules[], environments[] }
@@ -102,14 +106,20 @@ export function renderImportExportPage(opts: ImportExportOptions): HTMLElement {
   (el.querySelector('#import-file-input') as HTMLInputElement)?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Import file is too large', 'Maximum supported size is 5 MB.');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const data = JSON.parse(reader.result as string) as ExportSchema;
-        if (!data.version || !Array.isArray(data.rules)) {
-          toast.error('Invalid import file format');
+        const raw = JSON.parse(reader.result as string) as unknown;
+        const validation = validateExportSchema(raw);
+        if (!validation.valid) {
+          toast.error('Invalid import file', validation.errors[0]);
           return;
         }
+        const data = asExportSchema(raw);
         pendingImport = data;
         const preview = el.querySelector('#import-preview') as HTMLElement;
         preview.style.display = 'block';
@@ -142,13 +152,17 @@ export function renderImportExportPage(opts: ImportExportOptions): HTMLElement {
       variant: mode === 'replace' ? 'danger' : 'primary',
     });
     if (!confirmed) return;
-    await opts.onImport(pendingImport, mode);
-    toast.success('Import successful', `${pendingImport.rules.length} rules imported`);
-    pendingImport = null;
-    const preview = el.querySelector('#import-preview') as HTMLElement;
-    preview.style.display = 'none';
-    (el.querySelector('#import-actions') as HTMLElement).style.display = 'none';
-    (el.querySelector('#import-file-input') as HTMLInputElement).value = '';
+    try {
+      await opts.onImport(pendingImport, mode);
+      toast.success('Import successful', `${pendingImport.rules.length} rules imported`);
+      pendingImport = null;
+      const preview = el.querySelector('#import-preview') as HTMLElement;
+      preview.style.display = 'none';
+      (el.querySelector('#import-actions') as HTMLElement).style.display = 'none';
+      (el.querySelector('#import-file-input') as HTMLInputElement).value = '';
+    } catch (error) {
+      toast.error('Import failed', String(error));
+    }
   };
 
   el.querySelector('#btn-import-merge')?.addEventListener('click', () => doImport('merge'));

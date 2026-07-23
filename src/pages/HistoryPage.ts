@@ -6,7 +6,7 @@ import { toast } from '../components/Toast.js';
 
 interface HistoryPageOptions {
   history: HistoryEntry[];
-  onClear: () => void;
+  onClear: () => Promise<void>;
 }
 
 export function renderHistoryPage(opts: HistoryPageOptions): HTMLElement {
@@ -34,7 +34,7 @@ export function renderHistoryPage(opts: HistoryPageOptions): HTMLElement {
       const ok = await showConfirm({ title: 'Clear History', body: 'This will remove all history entries. This cannot be undone.', confirmLabel: 'Clear All', variant: 'danger' });
       if (!ok) return;
       entries = [];
-      opts.onClear();
+      await opts.onClear();
       toast.success('History cleared');
       render();
     });
@@ -85,11 +85,11 @@ function renderEntries(entries: HistoryEntry[]): string {
               <td>
                 <span class="badge ${h.status === 'applied' ? 'badge-green' : 'badge-red'}">
                   ${h.status === 'applied' ? Icons.check({ size: 10 }) : Icons.close({ size: 10 })}
-                  ${h.status}
+                  ${escapeHtml(h.status)}
                 </span>
               </td>
               <td>
-                <span class="badge badge-gray" style="font-family:var(--font-mono);font-size:10px">${h.method}</span>
+                <span class="badge badge-gray" style="font-family:var(--font-mono);font-size:10px">${escapeHtml(h.method)}</span>
               </td>
               <td style="max-width:300px">
                 <div style="font-family:var(--font-mono);font-size:var(--text-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)" title="${escapeHtml(h.url)}">${escapeHtml(h.url)}</div>

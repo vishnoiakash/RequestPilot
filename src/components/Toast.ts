@@ -1,4 +1,5 @@
 import { Icons } from '../utils/icons.js';
+import { escapeHtml } from '../utils/helpers.js';
 
 type ToastVariant = 'success' | 'error' | 'warning' | 'info';
 
@@ -52,8 +53,8 @@ class ToastManager {
     toast.innerHTML = `
       <span class="toast-icon">${iconMap[variant]}</span>
       <div class="toast-content">
-        <div class="toast-title">${title}</div>
-        ${message ? `<div class="toast-message">${message}</div>` : ''}
+        <div class="toast-title">${escapeHtml(title)}</div>
+        ${message ? `<div class="toast-message">${escapeHtml(message)}</div>` : ''}
       </div>
       <button class="toast-close" aria-label="Dismiss notification">
         ${Icons.close({ size: 14 })}

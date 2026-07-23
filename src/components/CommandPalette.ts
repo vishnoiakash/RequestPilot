@@ -14,6 +14,7 @@ export class CommandPalette {
   private filtered: Command[] = [];
   private focusedIdx = 0;
   private isOpen = false;
+  private previousFocus: HTMLElement | null = null;
 
   constructor() {
     this.overlay = this.buildOverlay();
@@ -37,7 +38,7 @@ export class CommandPalette {
       <div class="command-palette" role="document">
         <div class="command-palette-input-wrap">
           <span style="color:var(--color-text-tertiary)">${Icons.command({ size: 16 })}</span>
-          <input class="command-palette-input" type="text" placeholder="Search commands…" id="cmd-input" autocomplete="off" role="combobox" aria-expanded="true"/>
+          <input class="command-palette-input" type="text" placeholder="Search commands…" id="cmd-input" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="cmd-list"/>
           <kbd style="font-size:var(--text-xs);color:var(--color-text-tertiary);background:var(--color-bg);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px;font-family:var(--font-mono)">Esc</kbd>
         </div>
         <div class="command-list" id="cmd-list" role="listbox"></div>
@@ -69,7 +70,7 @@ export class CommandPalette {
       return;
     }
     list.innerHTML = this.filtered.map((c, i) => `
-      <div class="command-item ${i === this.focusedIdx ? 'focused' : ''}" data-cmd-idx="${i}" role="option" aria-selected="${i === this.focusedIdx}">
+      <div class="command-item ${i === this.focusedIdx ? 'focused' : ''}" id="cmd-option-${i}" data-cmd-idx="${i}" role="option" aria-selected="${i === this.focusedIdx}">
         <span class="command-item-icon">${c.icon}</span>
         <span class="command-item-label">${c.label}</span>
         ${c.kbd ? `<kbd class="command-item-kbd">${c.kbd}</kbd>` : ''}
@@ -82,6 +83,8 @@ export class CommandPalette {
         this.executeCommand(idx);
       });
     });
+    const input = this.overlay.querySelector('#cmd-input');
+    input?.setAttribute('aria-activedescendant', `cmd-option-${this.focusedIdx}`);
   }
 
   private handleKey(e: KeyboardEvent): void {
@@ -110,6 +113,7 @@ export class CommandPalette {
   }
 
   open(): void {
+    this.previousFocus = document.activeElement as HTMLElement | null;
     this.filtered = this.commands;
     this.focusedIdx = 0;
     this.renderList();
@@ -123,6 +127,7 @@ export class CommandPalette {
   close(): void {
     this.overlay.classList.remove('open');
     this.isOpen = false;
+    this.previousFocus?.focus();
   }
 
   toggle(): void {

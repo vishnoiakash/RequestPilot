@@ -195,10 +195,10 @@ const SECTION_QUERY_PARAMS = `
   ${p('Query param rules add, replace, or remove URL query string parameters on matching requests — without touching the page\'s JavaScript.')}
   ${fieldTable([
     ['Key',       'Yes', 'The query parameter name, e.g. debug, version, locale.'],
-    ['Value',     'Cond.', `Required for Set / Append. Supports ${c('{{VAR}}')} placeholders.`],
-    ['Operation', 'Yes', `${c('set')} creates or replaces the param. ${c('append')} adds a duplicate key. ${c('remove')} deletes the param.`],
+    ['Value',     'Cond.', `Required for Set. Supports ${c('{{VAR}}')} placeholders.`],
+    ['Operation', 'Yes', `${c('set')} creates or replaces the param. ${c('remove')} deletes the param.`],
   ])}
-  <h3 class="htu-h3">Example — Always append ?debug=true to API calls</h3>
+  <h3 class="htu-h3">Example — Always set ?debug=true on API calls</h3>
   ${example('Rule configuration', Icons.edit({ size: 12 }), `Match URL : https://api.example.com/*
 Key       : debug
 Value     : true
@@ -348,12 +348,12 @@ const SECTION_EXPECTATIONS = `
     ${step(2, 'Service worker applies DNR rules', 'The background service worker converts your rules to declarativeNetRequest dynamic rules. This happens within milliseconds of saving.')}
     ${step(3, 'Browser intercepts the request', 'Before the request reaches the server, the browser network stack applies the DNR modification — headers are changed, URL is redirected, or query params are transformed.')}
     ${step(4, 'Server receives modified request', 'The server sees the modified headers / URL / params. From its perspective, those values came from the browser normally.')}
-    ${step(5, 'History is updated', 'The service worker\'s onRuleMatchedDebug listener records the match in History.')}
+    ${step(5, 'History is updated', 'A read-only webRequest observer records the matched rule locally, with sensitive query values redacted by default.')}
   </div>
 
   <h3 class="htu-h3">Mock API / Response Override Rules</h3>
   <div class="htu-steps">
-    ${step(1, 'Content script is injected', 'RequestPilot\'s interceptor.js runs at document_start in every page, before any page scripts execute.')}
+    ${step(1, 'Content scripts are injected', 'An isolated extension bridge loads validated configuration and a minimal main-world interceptor wraps fetch/XHR at document_start.')}
     ${step(2, 'fetch and XHR are wrapped', 'The content script replaces window.fetch and window.XMLHttpRequest with intercepted versions that check rules before making network calls.')}
     ${step(3, 'Matching request is caught', 'When page JavaScript calls fetch() or new XMLHttpRequest(), the interceptor checks if any Mock API rule matches the URL and method.')}
     ${step(4, 'Mock: synthetic response returned', 'For Mock API rules, the real network request is never made. A Response object with your configured body, status, and headers is returned directly.')}
@@ -361,7 +361,7 @@ const SECTION_EXPECTATIONS = `
   </div>
 
   ${callout('info', Icons.info({ size: 16 }), '<strong>Rule changes take effect immediately</strong> for new requests. Any request already in-flight when you save a rule will not be affected. Reload the page to ensure a fresh request goes through the new rules.')}
-  ${callout('warn', Icons.alertTriangle({ size: 16 }), '<strong>DevTools Network tab</strong> shows the original unmodified request/response for Mock API and Response Override — because the interception happens in JavaScript before the browser network layer. To verify mock rules are working, check the History page or add a console.log to your page code.')}
+  ${callout('warn', Icons.alertTriangle({ size: 16 }), '<strong>DevTools Network tab:</strong> a Mock API rule prevents the real request, so no corresponding network entry appears. A Response Override still makes the request, and DevTools shows the server’s original response; page JavaScript receives the overridden body. Use RequestPilot History or your application code to verify the applied rule.')}
 </section>`;
 
 const SECTION_FAQ = `
@@ -374,7 +374,7 @@ const SECTION_FAQ = `
   ${faq('Do I need to create an Environment to use rules?',
     `No. Environments are optional. They are only needed if you use ${c('{{VARIABLE}}')} placeholders in rule fields. If you type a plain URL or value with no placeholders, the rule works without any environment.`)}
   ${faq('The History page shows no entries — why?',
-    `History for Header / Redirect / Query / Cookie rules is logged via ${c('declarativeNetRequest.onRuleMatchedDebug')}, which requires the extension to have the ${c('declarativeNetRequestFeedback')} permission (already granted). If rules are firing but History is empty, try reloading the extension from edge://extensions. History for Mock API / Response Override rules is logged via the content script — it should appear immediately.`)}
+    'Open Settings and confirm Request History is enabled. History is stored locally and sensitive token-like query values are redacted by default. Rule cards marked Invalid are not activated.')}
   ${faq('Can I use RequestPilot to test HTTPS APIs on localhost?',
     'Yes. Redirect rules can send staging URLs to localhost. Note that redirecting HTTPS → HTTP may be blocked by the browser\'s mixed-content policy on secure pages. Use localhost with HTTPS (self-signed cert) or test on HTTP pages.')}
   ${faq('How do I share my rules with a teammate?',

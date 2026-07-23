@@ -1,15 +1,21 @@
 import type { AnyRule, Environment, Settings, HistoryEntry, ExportSchema } from '../models/types.js';
 import { STORAGE_KEYS } from '../models/types.js';
+import { asExportSchema } from '../validation/schema.js';
 
 // ============================================================
 // Default Settings — used on first install and after reset
 // ============================================================
 
-const DEFAULT_SETTINGS: Settings = {
+const CURRENT_SCHEMA_VERSION = 3;
+
+export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
   defaultEnvironmentId: null,
   autoBackup: false,
   extensionEnabled: true,
+  historyEnabled: true,
+  redactSensitiveData: true,
+  historyLimit: 500,
 };
 
 // ============================================================
@@ -31,11 +37,19 @@ export class StorageService {
   // ----------------------------------------------------------
 
   async initialize(): Promise<void> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.INITIALIZED);
+    const result = await chrome.storage.local.get([
+      STORAGE_KEYS.INITIALIZED,
+      STORAGE_KEYS.SCHEMA_VERSION,
+    ]);
     if (!result[STORAGE_KEYS.INITIALIZED]) {
       await this.initEmpty();
-      await chrome.storage.local.set({ [STORAGE_KEYS.INITIALIZED]: true });
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.INITIALIZED]: true,
+        [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
+      });
+      return;
     }
+    await this.migrate(Number(result[STORAGE_KEYS.SCHEMA_VERSION] ?? 1));
   }
 
   private async initEmpty(): Promise<void> {
@@ -43,9 +57,32 @@ export class StorageService {
       [STORAGE_KEYS.RULES]:        [],
       [STORAGE_KEYS.ENVIRONMENTS]: [],
       [STORAGE_KEYS.HISTORY]:      [],
+      [STORAGE_KEYS.USAGE]:        {},
     });
     await chrome.storage.sync.set({
       [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS,
+    });
+  }
+
+  private async migrate(fromVersion: number): Promise<void> {
+    if (fromVersion < 2) {
+      const settings = await this.getSettings();
+      await chrome.storage.sync.set({
+        [STORAGE_KEYS.SETTINGS]: { ...DEFAULT_SETTINGS, ...settings },
+      });
+    }
+    if (fromVersion < 3) {
+      const result = await chrome.storage.local.get([STORAGE_KEYS.RULES, STORAGE_KEYS.USAGE]);
+      const rules = (result[STORAGE_KEYS.RULES] as AnyRule[] | undefined) ?? [];
+      const usage = (result[STORAGE_KEYS.USAGE] as Record<string, number> | undefined) ?? {};
+      rules.forEach((rule) => {
+        if (rule.usageCount) usage[rule.id] = rule.usageCount;
+      });
+      await this.writeRules(rules);
+      await chrome.storage.local.set({ [STORAGE_KEYS.USAGE]: usage });
+    }
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
     });
   }
 
@@ -54,11 +91,24 @@ export class StorageService {
   // ----------------------------------------------------------
 
   async getRules(): Promise<AnyRule[]> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.RULES);
-    return (result[STORAGE_KEYS.RULES] as AnyRule[]) || [];
+    const result = await chrome.storage.local.get([STORAGE_KEYS.RULES, STORAGE_KEYS.USAGE]);
+    const usage = (result[STORAGE_KEYS.USAGE] as Record<string, number> | undefined) ?? {};
+    return ((result[STORAGE_KEYS.RULES] as AnyRule[]) || []).map((rule) => ({
+      ...rule,
+      usageCount: usage[rule.id] ?? rule.usageCount ?? 0,
+    }));
+  }
+
+  private async writeRules(rules: AnyRule[]): Promise<void> {
+    const serialized = rules.map((rule) => {
+      const { usageCount: _usageCount, ...storedRule } = rule;
+      return storedRule as AnyRule;
+    });
+    await chrome.storage.local.set({ [STORAGE_KEYS.RULES]: serialized });
   }
 
   async saveRule(rule: AnyRule): Promise<void> {
+    await this.maybeAutoBackup();
     const rules = await this.getRules();
     const now = new Date().toISOString();
     const idx = rules.findIndex((r) => r.id === rule.id);
@@ -67,18 +117,21 @@ export class StorageService {
     } else {
       rules.push({ ...rule, id: rule.id || crypto.randomUUID(), createdAt: now, updatedAt: now });
     }
-    await chrome.storage.local.set({ [STORAGE_KEYS.RULES]: rules });
-    await this.maybeAutoBackup();
+    await this.writeRules(rules);
   }
 
   async deleteRule(id: string): Promise<void> {
+    await this.maybeAutoBackup();
     const rules = await this.getRules();
-    await chrome.storage.local.set({
-      [STORAGE_KEYS.RULES]: rules.filter((r) => r.id !== id),
-    });
+    await this.writeRules(rules.filter((r) => r.id !== id));
+    const usageResult = await chrome.storage.local.get(STORAGE_KEYS.USAGE);
+    const usage = (usageResult[STORAGE_KEYS.USAGE] as Record<string, number> | undefined) ?? {};
+    delete usage[id];
+    await chrome.storage.local.set({ [STORAGE_KEYS.USAGE]: usage });
   }
 
   async duplicateRule(id: string): Promise<AnyRule | null> {
+    await this.maybeAutoBackup();
     const rules = await this.getRules();
     const rule = rules.find((r) => r.id === id);
     if (!rule) return null;
@@ -92,17 +145,43 @@ export class StorageService {
       updatedAt: now,
     } as AnyRule;
     rules.push(copy);
-    await chrome.storage.local.set({ [STORAGE_KEYS.RULES]: rules });
+    await this.writeRules(rules);
     return copy;
   }
 
   async toggleRule(id: string, enabled: boolean): Promise<void> {
+    await this.maybeAutoBackup();
     const rules = await this.getRules();
     const idx = rules.findIndex((r) => r.id === id);
     if (idx >= 0) {
       rules[idx] = { ...rules[idx], enabled, updatedAt: new Date().toISOString() };
-      await chrome.storage.local.set({ [STORAGE_KEYS.RULES]: rules });
+      await this.writeRules(rules);
     }
+  }
+
+  async toggleRulesByType(type: AnyRule['type'], enabled: boolean): Promise<void> {
+    await this.maybeAutoBackup();
+    const rules = await this.getRules();
+    const now = new Date().toISOString();
+    let changed = false;
+    rules.forEach((rule) => {
+      if (rule.type === type && rule.enabled !== enabled) {
+        rule.enabled = enabled;
+        rule.updatedAt = now;
+        changed = true;
+      }
+    });
+    if (changed) {
+      await this.writeRules(rules);
+    }
+  }
+
+  async incrementUsageCounts(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const result = await chrome.storage.local.get(STORAGE_KEYS.USAGE);
+    const usage = (result[STORAGE_KEYS.USAGE] as Record<string, number> | undefined) ?? {};
+    ids.forEach((id) => { usage[id] = (usage[id] ?? 0) + 1; });
+    await chrome.storage.local.set({ [STORAGE_KEYS.USAGE]: usage });
   }
 
   // ----------------------------------------------------------
@@ -115,6 +194,7 @@ export class StorageService {
   }
 
   async saveEnvironment(env: Environment): Promise<void> {
+    await this.maybeAutoBackup();
     const envs = await this.getEnvironments();
     const idx = envs.findIndex((e) => e.id === env.id);
     if (idx >= 0) {
@@ -126,6 +206,7 @@ export class StorageService {
   }
 
   async deleteEnvironment(id: string): Promise<void> {
+    await this.maybeAutoBackup();
     let envs = await this.getEnvironments();
     const wasActive = envs.find((e) => e.id === id)?.isActive ?? false;
     envs = envs.filter((e) => e.id !== id);
@@ -135,7 +216,8 @@ export class StorageService {
     await chrome.storage.local.set({ [STORAGE_KEYS.ENVIRONMENTS]: envs });
   }
 
-  async setActiveEnvironment(id: string): Promise<void> {
+  async setActiveEnvironment(id: string, createBackup = true): Promise<void> {
+    if (createBackup) await this.maybeAutoBackup();
     const envs = await this.getEnvironments();
     envs.forEach((e) => { e.isActive = e.id === id; });
     await chrome.storage.local.set({ [STORAGE_KEYS.ENVIRONMENTS]: envs });
@@ -152,11 +234,22 @@ export class StorageService {
 
   async getSettings(): Promise<Settings> {
     const result = await chrome.storage.sync.get(STORAGE_KEYS.SETTINGS);
-    return (result[STORAGE_KEYS.SETTINGS] as Settings) || DEFAULT_SETTINGS;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...((result[STORAGE_KEYS.SETTINGS] as Partial<Settings>) || {}),
+    };
   }
 
   async saveSettings(settings: Settings): Promise<void> {
     await chrome.storage.sync.set({ [STORAGE_KEYS.SETTINGS]: settings });
+    if (settings.autoBackup) {
+      const existing = await this.getAutoBackup();
+      if (!existing) {
+        await chrome.storage.local.set({
+          [STORAGE_KEYS.AUTO_BACKUP]: await this.exportAll(),
+        });
+      }
+    }
   }
 
   // ----------------------------------------------------------
@@ -174,7 +267,8 @@ export class StorageService {
 
   async addHistoryEntry(entry: HistoryEntry): Promise<void> {
     const history = await this.getHistory();
-    const updated = [entry, ...history].slice(0, 500);
+    const settings = await this.getSettings();
+    const updated = [entry, ...history].slice(0, settings.historyLimit);
     await chrome.storage.local.set({ [STORAGE_KEYS.HISTORY]: updated });
   }
 
@@ -183,10 +277,14 @@ export class StorageService {
   // ----------------------------------------------------------
 
   async exportAll(): Promise<ExportSchema> {
-    const [rules, environments] = await Promise.all([
+    const [rulesWithUsage, environments] = await Promise.all([
       this.getRules(),
       this.getEnvironments(),
     ]);
+    const rules = rulesWithUsage.map((rule) => {
+      const { usageCount: _usageCount, ...exportedRule } = rule;
+      return exportedRule as AnyRule;
+    });
     return {
       version: '1.0.0',
       exportedAt: new Date().toISOString(),
@@ -196,10 +294,12 @@ export class StorageService {
   }
 
   async importAll(data: ExportSchema, mode: 'merge' | 'replace'): Promise<void> {
+    await this.maybeAutoBackup();
+    const validated = asExportSchema(data);
     if (mode === 'replace') {
+      await this.writeRules(validated.rules);
       await chrome.storage.local.set({
-        [STORAGE_KEYS.RULES]:        data.rules,
-        [STORAGE_KEYS.ENVIRONMENTS]: data.environments,
+        [STORAGE_KEYS.ENVIRONMENTS]: validated.environments,
       });
     } else {
       const [existing, existingEnvs] = await Promise.all([
@@ -207,15 +307,15 @@ export class StorageService {
         this.getEnvironments(),
       ]);
       const mergedRules = [...existing];
-      data.rules.forEach((r) => {
+      validated.rules.forEach((r) => {
         if (!mergedRules.find((e) => e.id === r.id)) mergedRules.push(r);
       });
       const mergedEnvs = [...existingEnvs];
-      data.environments.forEach((e) => {
+      validated.environments.forEach((e) => {
         if (!mergedEnvs.find((x) => x.id === e.id)) mergedEnvs.push(e);
       });
+      await this.writeRules(mergedRules);
       await chrome.storage.local.set({
-        [STORAGE_KEYS.RULES]:        mergedRules,
         [STORAGE_KEYS.ENVIRONMENTS]: mergedEnvs,
       });
     }
@@ -225,7 +325,10 @@ export class StorageService {
     await chrome.storage.local.clear();
     await chrome.storage.sync.clear();
     await this.initEmpty();
-    await chrome.storage.local.set({ [STORAGE_KEYS.INITIALIZED]: true });
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.INITIALIZED]: true,
+      [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
+    });
   }
 
   // ----------------------------------------------------------
@@ -238,6 +341,27 @@ export class StorageService {
       const snapshot = await this.exportAll();
       await chrome.storage.local.set({ [STORAGE_KEYS.AUTO_BACKUP]: snapshot });
     }
+  }
+
+  async getAutoBackup(): Promise<ExportSchema | null> {
+    const result = await chrome.storage.local.get(STORAGE_KEYS.AUTO_BACKUP);
+    const value = result[STORAGE_KEYS.AUTO_BACKUP];
+    if (!value) return null;
+    try {
+      return asExportSchema(value);
+    } catch {
+      return null;
+    }
+  }
+
+  async restoreAutoBackup(): Promise<boolean> {
+    const backup = await this.getAutoBackup();
+    if (!backup) return false;
+    await this.writeRules(backup.rules);
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.ENVIRONMENTS]: backup.environments,
+    });
+    return true;
   }
 }
 

@@ -4,15 +4,17 @@ import { getRuleTypeBadgeClass, getRuleTypeLabel, debounce, escapeHtml, statusCo
 import { RuleEditor } from '../components/RuleEditor.js';
 import { showConfirm } from '../components/Modal.js';
 import { toast } from '../components/Toast.js';
+import { validateRule } from '../validation/schema.js';
 
 interface RulesPageOptions {
   type: RuleType;
   rules: AnyRule[];
   environment: Environment | null;
-  onSave: (rule: AnyRule) => void;
-  onDelete: (id: string) => void;
-  onToggle: (id: string, enabled: boolean) => void;
-  onDuplicate: (id: string) => void;
+  onSave: (rule: AnyRule) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onToggle: (id: string, enabled: boolean) => Promise<void>;
+  onDuplicate: (id: string) => Promise<AnyRule | null>;
+  onBulkToggle: (enabled: boolean) => Promise<void>;
   onExport: () => void;
   onImport: () => void;
 }
@@ -87,6 +89,8 @@ function buildPageContent(opts: RulesPageOptions): string {
           </select>` : ''}
       </div>
       <div class="toolbar-right">
+        <button class="btn btn-ghost btn-sm" id="bulk-enable">Enable All</button>
+        <button class="btn btn-ghost btn-sm" id="bulk-disable">Disable All</button>
         <select class="select" id="sort-select" style="width:160px">
           <option value="name-asc">Name A–Z</option>
           <option value="name-desc">Name Z–A</option>
@@ -109,11 +113,12 @@ function renderRuleCards(rules: AnyRule[], type: RuleType): string {
 
 function renderRuleCard(r: AnyRule, _type: RuleType): string {
   const meta = getRuleMeta(r);
+  const validation = validateRule(r);
   return `
-    <div class="rule-card ${r.enabled ? '' : 'disabled'}" data-rule-id="${r.id}">
+    <div class="rule-card ${r.enabled ? '' : 'disabled'}" data-rule-id="${escapeHtml(r.id)}">
       <div class="rule-card-left">
         <label class="toggle" title="${r.enabled ? 'Disable rule' : 'Enable rule'}">
-          <input type="checkbox" class="rule-toggle" data-id="${r.id}" ${r.enabled ? 'checked' : ''}/>
+          <input type="checkbox" class="rule-toggle" data-id="${escapeHtml(r.id)}" ${r.enabled ? 'checked' : ''}/>
           <div class="toggle-track"></div>
           <div class="toggle-thumb"></div>
         </label>
@@ -122,20 +127,25 @@ function renderRuleCard(r: AnyRule, _type: RuleType): string {
         <div class="rule-card-name">${escapeHtml(r.name)}</div>
         <div class="rule-card-meta">
           <span class="badge ${getRuleTypeBadgeClass(r.type)}">${getRuleTypeLabel(r.type)}</span>
+          <span class="badge ${validation.valid ? 'badge-green' : 'badge-red'}" title="${escapeHtml(validation.errors.join(' '))}">
+            ${validation.valid ? 'Valid' : 'Invalid'}
+          </span>
           ${meta.badges}
+          ${r.group ? `<span class="badge badge-gray">${escapeHtml(r.group)}</span>` : ''}
+          ${(r.tags ?? []).map((tag) => `<span class="badge badge-gray">#${escapeHtml(tag)}</span>`).join('')}
           <span style="font-size:var(--text-xs);color:var(--color-text-tertiary)">Priority ${r.priority}</span>
         </div>
         <div class="rule-card-url">${Icons.globe({ size: 11 })} <span>${escapeHtml((r as { urlMatcher?: { pattern?: string } }).urlMatcher?.pattern ?? '')}</span></div>
         ${meta.detail ? `<div class="rule-card-detail">${meta.detail}</div>` : ''}
       </div>
       <div class="rule-card-actions">
-        <button class="btn btn-ghost btn-icon btn-sm rule-edit" data-id="${r.id}" aria-label="Edit rule" data-tooltip="Edit">
+        <button class="btn btn-ghost btn-icon btn-sm rule-edit" data-id="${escapeHtml(r.id)}" aria-label="Edit rule" data-tooltip="Edit">
           ${Icons.edit({ size: 14 })}
         </button>
-        <button class="btn btn-ghost btn-icon btn-sm rule-dup" data-id="${r.id}" aria-label="Duplicate rule" data-tooltip="Duplicate">
+        <button class="btn btn-ghost btn-icon btn-sm rule-dup" data-id="${escapeHtml(r.id)}" aria-label="Duplicate rule" data-tooltip="Duplicate">
           ${Icons.copy({ size: 14 })}
         </button>
-        <button class="btn btn-ghost btn-icon btn-sm rule-del" data-id="${r.id}" aria-label="Delete rule" data-tooltip="Delete" style="color:var(--color-error)">
+        <button class="btn btn-ghost btn-icon btn-sm rule-del" data-id="${escapeHtml(r.id)}" aria-label="Delete rule" data-tooltip="Delete" style="color:var(--color-error)">
           ${Icons.trash({ size: 14 })}
         </button>
       </div>
@@ -194,7 +204,12 @@ function attachEvents(el: HTMLElement, opts: RulesPageOptions): (rule?: AnyRule)
     const sort = (el.querySelector('#sort-select') as HTMLSelectElement)?.value ?? 'name-asc';
 
     let filtered = currentRules;
-    if (search) filtered = filtered.filter((r) => r.name.toLowerCase().includes(search) || (r as { urlMatcher?: { pattern?: string } }).urlMatcher?.pattern?.toLowerCase().includes(search));
+    if (search) filtered = filtered.filter((r) =>
+      r.name.toLowerCase().includes(search) ||
+      (r as { urlMatcher?: { pattern?: string } }).urlMatcher?.pattern?.toLowerCase().includes(search) ||
+      r.group?.toLowerCase().includes(search) ||
+      r.tags?.some((tag) => tag.toLowerCase().includes(search))
+    );
     if (statusFilter === 'enabled') filtered = filtered.filter((r) => r.enabled);
     if (statusFilter === 'disabled') filtered = filtered.filter((r) => !r.enabled);
     if (targetFilter) filtered = filtered.filter((r) => r.type === 'header' && r.target === targetFilter);
@@ -221,8 +236,8 @@ function attachEvents(el: HTMLElement, opts: RulesPageOptions): (rule?: AnyRule)
       rule,
       type: opts.type,
       environment: opts.environment,
-      onSave: (saved) => {
-        opts.onSave(saved);
+      onSave: async (saved) => {
+        await opts.onSave(saved);
         const idx = currentRules.findIndex((r) => r.id === saved.id);
         if (idx >= 0) currentRules[idx] = saved;
         else currentRules.push(saved);
@@ -236,6 +251,18 @@ function attachEvents(el: HTMLElement, opts: RulesPageOptions): (rule?: AnyRule)
   el.querySelector('#filter-status')?.addEventListener('change', rerender);
   el.querySelector('#filter-target')?.addEventListener('change', rerender);
   el.querySelector('#sort-select')?.addEventListener('change', rerender);
+  el.querySelector('#bulk-enable')?.addEventListener('click', async () => {
+    await opts.onBulkToggle(true);
+    currentRules.forEach((rule) => { rule.enabled = true; });
+    toast.success('All rules on this page enabled');
+    rerender();
+  });
+  el.querySelector('#bulk-disable')?.addEventListener('click', async () => {
+    await opts.onBulkToggle(false);
+    currentRules.forEach((rule) => { rule.enabled = false; });
+    toast.success('All rules on this page disabled');
+    rerender();
+  });
 
   // Header buttons are wired by the caller via wireHeaderButtons()
 
@@ -259,14 +286,19 @@ function attachListEvents(el: HTMLElement, opts: RulesPageOptions, rerender: () 
   });
 
   el.querySelectorAll('.rule-toggle').forEach((tog) => {
-    tog.addEventListener('change', () => {
+    tog.addEventListener('change', async () => {
       const id = (tog as HTMLInputElement).dataset.id!;
       const enabled = (tog as HTMLInputElement).checked;
-      opts.onToggle(id, enabled);
-      const rule = currentRules.find((r) => r.id === id);
-      if (rule) rule.enabled = enabled;
-      const card = el.querySelector(`[data-rule-id="${id}"]`);
-      card?.classList.toggle('disabled', !enabled);
+      try {
+        await opts.onToggle(id, enabled);
+        const rule = currentRules.find((r) => r.id === id);
+        if (rule) rule.enabled = enabled;
+        const card = el.querySelector(`[data-rule-id="${id}"]`);
+        card?.classList.toggle('disabled', !enabled);
+      } catch (error) {
+        (tog as HTMLInputElement).checked = !enabled;
+        toast.error('Rule state was not changed', String(error));
+      }
     });
   });
 
@@ -279,10 +311,17 @@ function attachListEvents(el: HTMLElement, opts: RulesPageOptions, rerender: () 
   });
 
   el.querySelectorAll('.rule-dup').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      opts.onDuplicate((btn as HTMLElement).dataset.id!);
-      toast.success('Rule duplicated');
-      rerender();
+    btn.addEventListener('click', async () => {
+      try {
+        const copy = await opts.onDuplicate((btn as HTMLElement).dataset.id!);
+        if (copy) {
+          currentRules.push(copy);
+          toast.success('Rule duplicated');
+          rerender();
+        }
+      } catch (error) {
+        toast.error('Rule could not be duplicated', String(error));
+      }
     });
   });
 
@@ -297,7 +336,7 @@ function attachListEvents(el: HTMLElement, opts: RulesPageOptions, rerender: () 
         variant: 'danger',
       });
       if (confirmed) {
-        opts.onDelete(id);
+        await opts.onDelete(id);
         const idx = currentRules.findIndex((r) => r.id === id);
         if (idx >= 0) currentRules.splice(idx, 1);
         toast.success('Rule deleted');

@@ -1,7 +1,7 @@
 /**
  * Post-build asset copy script.
  * Copies static assets (CSS, HTML, icons) from src/ to dist/
- * after TypeScript compilation.
+ * after TypeScript compilation. Kept as CommonJS because the project output is ESM.
  */
 
 const fs   = require('fs');
@@ -63,18 +63,14 @@ copyFile(
 );
 console.log('✓ popup.html copied');
 
-// 4. Icons (PNG + SVG)
-const iconsDir = path.join(ROOT, 'assets', 'icons');
-if (fs.existsSync(iconsDir)) {
-  copyDir(iconsDir, path.join(DIST, 'assets', 'icons'));
-  console.log('✓ Icons copied');
+// Root-level icons and logo are referenced directly by the manifest and HTML.
+// Remove legacy duplicate copies so release packages remain small.
+for (const duplicateDir of [
+  path.join(DIST, 'assets', 'icons'),
+  path.join(DIST, 'assets', 'logo'),
+]) {
+  if (fs.existsSync(duplicateDir)) fs.rmSync(duplicateDir, { recursive: true, force: true });
 }
-
-// 5. Logo
-const logoDir = path.join(ROOT, 'assets', 'logo');
-if (fs.existsSync(logoDir)) {
-  copyDir(logoDir, path.join(DIST, 'assets', 'logo'));
-  console.log('✓ Logo copied');
-}
+console.log('✓ Duplicate image assets cleaned');
 
 console.log('\n✅ RequestPilot build assets ready');

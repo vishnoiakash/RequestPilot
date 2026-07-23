@@ -1,266 +1,206 @@
-/**
- * RequestPilot — Background Service Worker (Manifest V3)
- *
- * Responsibilities:
- *   1. Initialize storage with sample data on first install
- *   2. Convert RequestPilot rules → declarativeNetRequest dynamic rules
- *      and apply them whenever rules/settings/environments change
- *   3. Log history entries when matched rules fire
- *   4. Respond to messages from popup / options page
- *   5. Notify content scripts to refresh their in-memory rule cache
- */
-
 import { storageService } from '../storage/StorageService.js';
 import { applyDnrRules } from './ruleEngine.js';
-import { appendHistory } from './historyManager.js';
-import type { AnyRule } from '../models/types.js';
+import { appendHistory, appendHistoryBatch } from './historyManager.js';
+import { redactSensitiveUrl, ruleMatchesRequest } from '../utils/ruleMatcher.js';
+import type { AnyRule, Environment, Settings } from '../models/types.js';
 
-// ============================================================
-// Helpers
-// ============================================================
+let cachedRules: AnyRule[] = [];
+let cachedEnvironment: Environment | null = null;
+let cachedSettings: Settings | null = null;
 
-/**
- * Load everything from storage and push updated DNR rules.
- */
-async function syncRules(): Promise<void> {
+async function syncRules(): Promise<{ applied: number; errors: string[] }> {
   try {
-    const [rules, settings, activeEnv] = await Promise.all([
+    const [rules, settings, activeEnvironment] = await Promise.all([
       storageService.getRules(),
       storageService.getSettings(),
       storageService.getActiveEnvironment(),
     ]);
-
-    const { applied, errors } = await applyDnrRules(
-      rules,
-      activeEnv,
-      settings.extensionEnabled
-    );
-
-    if (errors.length) {
-      console.warn('[RequestPilot] DNR errors:', errors);
-    } else {
-      console.log(`[RequestPilot] Synced — ${applied} active DNR rules`);
+    cachedRules = rules;
+    cachedSettings = settings;
+    cachedEnvironment = activeEnvironment;
+    const result = await applyDnrRules(rules, activeEnvironment, settings.extensionEnabled);
+    if (result.errors.length) {
+      console.warn('[RequestPilot] Some rules were not applied:', result.errors);
     }
-
-    // Notify all tabs so content scripts reload their mock/override rules
-    notifyContentScripts();
-  } catch (err) {
-    console.error('[RequestPilot] syncRules error:', err);
+    return result;
+  } catch (error) {
+    const message = String(error);
+    console.error('[RequestPilot] Rule synchronization failed:', error);
+    return { applied: 0, errors: [message] };
   }
 }
 
-/**
- * Send a lightweight message to all tabs so the content script
- * re-reads storage for mock/override rules.
- */
-function notifyContentScripts(): void {
-  chrome.tabs.query({}, (tabs) => {
-    for (const tab of tabs) {
-      if (tab.id && tab.id !== chrome.tabs.TAB_ID_NONE) {
-        chrome.tabs.sendMessage(tab.id, { type: 'RULES_UPDATED' }).catch(() => {
-          // Tab may not have our content script — ignore
-        });
-      }
-    }
-  });
-}
-
-// ============================================================
-// History logging via declarativeNetRequest matched rules feedback
-// ============================================================
-
-/**
- * Map from stable DNR rule ID → RequestPilot rule (rebuilt on sync).
- * Used to resolve which rule fired when logging history.
- */
-let dnrIdToRule: Map<number, AnyRule> = new Map();
-
-async function rebuildDnrIdMap(): Promise<void> {
-  try {
-    const [rules, activeEnv] = await Promise.all([
-      storageService.getRules(),
-      storageService.getActiveEnvironment(),
-    ]);
-
-    const { buildDnrRules } = await import('./ruleEngine.js');
-    const dnrRules = buildDnrRules(rules, activeEnv);
-
-    dnrIdToRule = new Map();
-    for (const dnrRule of dnrRules) {
-      // Find matching RequestPilot rule by stable ID
-      const pilotRule = rules.find((r) => {
-        // stableId logic: we re-derive it from the rule id string
-        let hash = 0;
-        for (let i = 0; i < r.id.length; i++) {
-          hash = (Math.imul(31, hash) + r.id.charCodeAt(i)) | 0;
-        }
-        const base = (Math.abs(hash) % (30000 - 1000 - 100)) + 1000;
-        return base === dnrRule.id || base + 1 === dnrRule.id || base + 2 === dnrRule.id;
-      });
-      if (pilotRule) dnrIdToRule.set(dnrRule.id, pilotRule);
-    }
-  } catch (err) {
-    console.error('[RequestPilot] rebuildDnrIdMap error:', err);
+async function activateDefaultEnvironment(): Promise<void> {
+  const settings = await storageService.getSettings();
+  if (!settings.defaultEnvironmentId) return;
+  const environments = await storageService.getEnvironments();
+  if (environments.some((environment) => environment.id === settings.defaultEnvironmentId)) {
+    await storageService.setActiveEnvironment(settings.defaultEnvironmentId, false);
   }
 }
 
-// Listen for rules that actually fired (requires declarativeNetRequestFeedback)
-if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
-  chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(
-    async (info) => {
-      const rule = dnrIdToRule.get(info.rule.ruleId);
-      if (!rule) return;
-
-      const modType =
-        rule.type === 'header'   ? `Header ${rule.type === 'header' ? (rule as { target: string }).target === 'request' ? 'Request Modify' : 'Response Modify' : ''}` :
-        rule.type === 'redirect' ? 'URL Redirect' :
-        rule.type === 'queryParam' ? 'Query Param' :
-        rule.type === 'cookie'   ? 'Cookie Modify' : rule.type;
-
-      await appendHistory({
-        ruleName:         rule.name,
-        ruleId:           rule.id,
-        ruleType:         rule.type,
-        method:           info.request.method,
-        url:              info.request.url,
-        modificationType: modType,
-        status:           'applied',
-      });
-    }
-  );
+function withoutUsageCounts(value: unknown): string {
+  if (!Array.isArray(value)) return JSON.stringify(value);
+  return JSON.stringify(value.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const { usageCount: _usageCount, ...rest } = item as Record<string, unknown>;
+    return rest;
+  }));
 }
-
-// ============================================================
-// Storage change listener — re-sync whenever rules change
-// ============================================================
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
-  const relevantKeys = [
-    'requestpilot_rules',
-    'requestpilot_environments',
-    'requestpilot_settings',
-  ];
-
-  const affected = Object.keys(changes).some((k) => relevantKeys.includes(k));
-  if (!affected) return;
-
-  if (area === 'local' || area === 'sync') {
-    await syncRules();
-    await rebuildDnrIdMap();
-  }
+  if (area !== 'local' && area !== 'sync') return;
+  const ruleChange = changes.requestpilot_rules;
+  const rulesOnlyUsageChanged = ruleChange
+    ? withoutUsageCounts(ruleChange.oldValue) === withoutUsageCounts(ruleChange.newValue)
+    : false;
+  const requiresSync =
+    (!rulesOnlyUsageChanged && Boolean(ruleChange)) ||
+    Boolean(changes.requestpilot_environments) ||
+    Boolean(changes.requestpilot_settings);
+  if (requiresSync) await syncRules();
 });
 
-// ============================================================
-// Install / Update
-// ============================================================
-
-chrome.runtime.onInstalled.addListener(async (details) => {
-  if (details.reason === 'install' || details.reason === 'update') {
-    try {
-      await storageService.initialize();
-      console.log('[RequestPilot] Initialized');
-      await syncRules();
-      await rebuildDnrIdMap();
-    } catch (err) {
-      console.error('[RequestPilot] Init error:', err);
-    }
-  }
+chrome.runtime.onInstalled.addListener(async () => {
+  await storageService.initialize();
+  await syncRules();
 });
-
-// ============================================================
-// Startup — re-apply rules (service worker restarts lose them)
-// ============================================================
 
 chrome.runtime.onStartup.addListener(async () => {
+  await storageService.initialize();
+  await activateDefaultEnvironment();
   await syncRules();
-  await rebuildDnrIdMap();
 });
 
-// Also sync on service worker wake (covers all cases)
-syncRules().then(() => rebuildDnrIdMap());
+void storageService.initialize().then(syncRules);
 
-// ============================================================
-// Browser action click → open options
-// ============================================================
-
-chrome.action.onClicked.addListener(() => {
-  chrome.runtime.openOptionsPage();
-});
-
-// ============================================================
-// Message handler
-// ============================================================
+// Store-compatible observation for history. Unlike onRuleMatchedDebug, webRequest
+// observation is available in packaged builds. Rules are validated before DNR sync,
+// so matching here mirrors the active rule configuration.
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!cachedSettings?.extensionEnabled || !cachedSettings.historyEnabled) return undefined;
+    const matching = cachedRules
+      .filter((rule) =>
+        rule.enabled &&
+        rule.type !== 'mock' &&
+        rule.type !== 'responseOverride' &&
+        ruleMatchesRequest(
+          rule,
+          { url: details.url, method: details.method, resourceType: details.type },
+          cachedEnvironment
+        )
+      )
+      .sort((a, b) => b.priority - a.priority);
+    if (!matching.length) return undefined;
+    const redirectWinner = matching.find((rule) =>
+      rule.type === 'redirect' || rule.type === 'queryParam'
+    );
+    const effective = matching.filter((rule) =>
+      rule.type === 'header' ||
+      rule.type === 'cookie' ||
+      rule === redirectWinner
+    );
+    const url = cachedSettings.redactSensitiveData
+      ? redactSensitiveUrl(details.url)
+      : details.url;
+    void appendHistoryBatch(effective.map((rule) => ({
+      ruleName: rule.name,
+      ruleId: rule.id,
+      ruleType: rule.type,
+      method: details.method,
+      url,
+      modificationType:
+        rule.type === 'header' ? `Header ${rule.target === 'request' ? 'Request' : 'Response'} Modify` :
+        rule.type === 'redirect' ? 'URL Redirect' :
+        rule.type === 'queryParam' ? 'Query Param Modify' :
+        'Cookie Modify',
+      status: 'applied',
+    })));
+    return undefined;
+  },
+  { urls: ['<all_urls>'] }
+);
 
 chrome.runtime.onMessage.addListener(
-  (message: unknown, _sender, sendResponse) => {
-    if (!message || typeof message !== 'object' || !('type' in message)) {
+  (message: unknown, sender, sendResponse) => {
+    if (!message || typeof message !== 'object' || !('type' in message)) return false;
+    const msg = message as { type: string };
+
+    if (msg.type === 'SYNC_RULES') {
+      syncRules()
+        .then((result) => sendResponse({ ok: result.errors.length === 0, ...result }))
+        .catch((error) => sendResponse({ ok: false, applied: 0, errors: [String(error)] }));
+      return true;
+    }
+
+    if (msg.type === 'GET_STATUS') {
+      storageService.getSettings().then((settings) => {
+        sendResponse({ enabled: settings.extensionEnabled });
+      });
+      return true;
+    }
+
+    if (msg.type === 'TOGGLE_EXTENSION') {
+      const enabled = (message as { enabled?: unknown }).enabled;
+      if (typeof enabled !== 'boolean') {
+        sendResponse({ ok: false, errors: ['Invalid enabled state.'] });
+        return false;
+      }
+      storageService.getSettings()
+        .then((settings) => storageService.saveSettings({ ...settings, extensionEnabled: enabled }))
+        .then(syncRules)
+        .then((result) => sendResponse({ ok: result.errors.length === 0, ...result }))
+        .catch((error) => sendResponse({ ok: false, errors: [String(error)] }));
+      return true;
+    }
+
+    if (msg.type === 'PING') {
+      sendResponse({ status: 'ok', version: chrome.runtime.getManifest().version });
       return false;
     }
 
-    const msg = message as { type: string };
-
-    switch (msg.type) {
-      case 'SYNC_RULES':
-        syncRules()
-          .then(() => rebuildDnrIdMap())
-          .then(() => sendResponse({ ok: true }))
-          .catch((e) => sendResponse({ ok: false, error: String(e) }));
-        return true;
-
-      case 'GET_STATUS': {
-        storageService.getSettings().then((s) => {
-          sendResponse({ enabled: s.extensionEnabled });
-        });
-        return true;
-      }
-
-      case 'TOGGLE_EXTENSION': {
-        const payload = msg as { type: string; enabled: boolean };
-        storageService.getSettings().then(async (s) => {
-          await storageService.saveSettings({ ...s, extensionEnabled: payload.enabled });
-          await syncRules();
-          sendResponse({ ok: true });
-        });
-        return true;
-      }
-
-      case 'PING':
-        sendResponse({ status: 'ok', version: chrome.runtime.getManifest().version });
-        return false;
-
-      case 'LOG_MOCK_HIT': {
-        // Content script reports a mock/override rule fired
-        const payload = msg as {
-          type: string;
-          ruleId: string;
-          ruleName: string;
-          ruleType: string;
-          method: string;
-          url: string;
-          modificationType: string;
-        };
-        appendHistory({
-          ruleName:         payload.ruleName,
-          ruleId:           payload.ruleId,
-          ruleType:         payload.ruleType as AnyRule['type'],
-          method:           payload.method,
-          url:              payload.url,
-          modificationType: payload.modificationType,
-          status:           'applied',
-        });
+    if (msg.type === 'LOG_MOCK_HIT' && sender.tab) {
+      const payload = message as {
+        ruleId?: unknown;
+        method?: unknown;
+        url?: unknown;
+        modificationType?: unknown;
+      };
+      if (
+        typeof payload.ruleId !== 'string' ||
+        typeof payload.method !== 'string' ||
+        typeof payload.url !== 'string'
+      ) {
         return false;
       }
+      const rule = cachedRules.find((candidate) =>
+        candidate.id === payload.ruleId &&
+        candidate.enabled &&
+        (candidate.type === 'mock' || candidate.type === 'responseOverride')
+      );
+      if (
+        !rule ||
+        !cachedSettings?.extensionEnabled ||
+        !ruleMatchesRequest(rule, { url: payload.url, method: payload.method }, cachedEnvironment)
+      ) {
+        return false;
+      }
+      const url = cachedSettings.redactSensitiveData
+        ? redactSensitiveUrl(payload.url)
+        : payload.url;
+      void appendHistory({
+        ruleName: rule.name,
+        ruleId: rule.id,
+        ruleType: rule.type,
+        method: payload.method,
+        url,
+        modificationType: rule.type === 'mock' ? 'Mock Response' : 'Response Override',
+        status: 'applied',
+      });
+      return false;
     }
 
     return false;
   }
 );
-
-// ============================================================
-// Keep-alive port
-// ============================================================
-
-chrome.runtime.onConnect.addListener((_port) => {
-  // Holding a port keeps the service worker alive while
-  // the popup or options page is open.
-});

@@ -58,6 +58,8 @@ export interface BaseRule {
   createdAt: string;
   updatedAt: string;
   description?: string;
+  group?: string;
+  tags?: string[];
   priority: number;
   usageCount?: number;
 }
@@ -123,6 +125,7 @@ export interface EnvironmentVariable {
   key: string;
   value: string;
   description?: string;
+  isSecret?: boolean;
 }
 
 export interface Environment {
@@ -143,6 +146,9 @@ export interface Settings {
   defaultEnvironmentId: string | null;
   autoBackup: boolean;
   extensionEnabled: boolean;
+  historyEnabled: boolean;
+  redactSensitiveData: boolean;
+  historyLimit: number;
 }
 
 // ============================================================
@@ -182,6 +188,8 @@ export const STORAGE_KEYS = {
   ENVIRONMENTS: 'requestpilot_environments',
   SETTINGS: 'requestpilot_settings',
   HISTORY: 'requestpilot_history',
+  USAGE: 'requestpilot_usage',
   AUTO_BACKUP: 'requestpilot_autobackup',
   INITIALIZED: 'requestpilot_initialized',
+  SCHEMA_VERSION: 'requestpilot_schema_version',
 } as const;

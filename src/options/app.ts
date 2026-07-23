@@ -1,5 +1,5 @@
 import type { AnyRule, RuleType, Environment, Settings } from '../models/types.js';
-import { storageService } from '../storage/StorageService.js';
+import { DEFAULT_SETTINGS, storageService } from '../storage/StorageService.js';
 import { Icons } from '../utils/icons.js';
 import { applyTheme } from '../utils/helpers.js';
 import { renderDashboard } from '../pages/DashboardPage.js';
@@ -61,13 +61,24 @@ const PAGE_RULE_TYPE: Partial<Record<PageId, RuleType>> = {
 
 let rules: AnyRule[] = [];
 let environments: Environment[] = [];
-let settings: Settings = { theme: 'system', defaultEnvironmentId: null, autoBackup: false, extensionEnabled: true };
+let settings: Settings = { ...DEFAULT_SETTINGS };
 let history: HistoryEntry[] = [];
+let hasAutoBackup = false;
 let currentPage: PageId = 'dashboard';
 let sidebarCollapsed = false;
 let manifestVersion = '1.0.0';
 
 const palette = new CommandPalette();
+
+async function syncAndReport(): Promise<void> {
+  const result = await chrome.runtime.sendMessage({ type: 'SYNC_RULES' }) as {
+    ok?: boolean;
+    errors?: string[];
+  };
+  if (result?.errors?.length) {
+    toast.warning('Some rules could not be activated', result.errors[0]);
+  }
+}
 
 // ============================================================
 // DOM References
@@ -86,12 +97,17 @@ const pageActions = document.getElementById('page-header-actions')!;
 async function bootstrap(): Promise<void> {
   try {
     await storageService.initialize();
-    [rules, environments, settings, history] = await Promise.all([
+    const loaded = await Promise.all([
       storageService.getRules(),
       storageService.getEnvironments(),
       storageService.getSettings(),
       storageService.getHistory(),
+      storageService.getAutoBackup(),
     ]);
+    [rules, environments, settings, history] = loaded.slice(0, 4) as [
+      AnyRule[], Environment[], Settings, HistoryEntry[]
+    ];
+    hasAutoBackup = loaded[4] !== null;
 
     try {
       const manifest = chrome.runtime.getManifest();
@@ -102,6 +118,7 @@ async function bootstrap(): Promise<void> {
     buildSidebar();
     setupGlobalShortcuts();
     setupCommandPalette();
+    setupStorageUpdates();
     navigateTo('dashboard');
   } catch (err) {
     console.error('RequestPilot bootstrap error:', err);
@@ -173,20 +190,6 @@ function navigateTo(pageId: PageId): void {
   const page = buildPage(pageId);
   mainContent.appendChild(page);
 
-  // Ctrl+N shortcut for rule pages
-  const ruleType = PAGE_RULE_TYPE[pageId];
-  if (ruleType) {
-    const addBtn = document.getElementById('page-add-btn');
-    if (addBtn) {
-      document.addEventListener('keydown', function handler(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-          e.preventDefault();
-          addBtn.click();
-          document.removeEventListener('keydown', handler);
-        }
-      });
-    }
-  }
 }
 
 // ============================================================
@@ -197,7 +200,10 @@ function buildPage(pageId: PageId): HTMLElement {
   const activeEnv = environments.find((e) => e.isActive) ?? null;
 
   if (pageId === 'dashboard') {
-    return renderDashboard(rules, history, (page) => navigateTo(page as PageId));
+    return renderDashboard(rules, history, (page, createNew) => {
+      navigateTo(page as PageId);
+      if (createNew) setTimeout(() => document.getElementById('page-add-btn')?.click(), 0);
+    });
   }
 
   if (pageId === 'environments') {
@@ -235,6 +241,7 @@ function buildPage(pageId: PageId): HTMLElement {
         await storageService.importAll(data, mode);
         rules = await storageService.getRules();
         environments = await storageService.getEnvironments();
+        await syncAndReport();
       },
     });
   }
@@ -244,6 +251,7 @@ function buildPage(pageId: PageId): HTMLElement {
       settings,
       environments,
       version: manifestVersion,
+      hasAutoBackup,
       onSave: async (s) => {
         settings = s;
         await storageService.saveSettings(s);
@@ -251,6 +259,14 @@ function buildPage(pageId: PageId): HTMLElement {
       },
       onReset: async () => {
         await storageService.resetToDefaults();
+      },
+      onRestore: async () => {
+        const restored = await storageService.restoreAutoBackup();
+        if (!restored) throw new Error('No valid auto-backup is available.');
+        [rules, environments] = await Promise.all([
+          storageService.getRules(),
+          storageService.getEnvironments(),
+        ]);
       },
     });
   }
@@ -269,17 +285,26 @@ function buildPage(pageId: PageId): HTMLElement {
       onSave: async (rule) => {
         await storageService.saveRule(rule);
         rules = await storageService.getRules();
+        await syncAndReport();
       },
       onDelete: async (id) => {
         await storageService.deleteRule(id);
         rules = rules.filter((r) => r.id !== id);
+        await syncAndReport();
       },
       onToggle: async (id, enabled) => {
         await storageService.toggleRule(id, enabled);
+        await syncAndReport();
       },
       onDuplicate: async (id) => {
         const copy = await storageService.duplicateRule(id);
         if (copy) rules.push(copy);
+        return copy;
+      },
+      onBulkToggle: async (enabled) => {
+        await storageService.toggleRulesByType(ruleType, enabled);
+        rules = await storageService.getRules();
+        await syncAndReport();
       },
       onExport: async () => {
         const { downloadJson } = await import('../utils/helpers.js');
@@ -313,10 +338,31 @@ function buildPage(pageId: PageId): HTMLElement {
 
 function setupGlobalShortcuts(): void {
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      // Handled by drawers and modals individually
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n' && PAGE_RULE_TYPE[currentPage]) {
+      e.preventDefault();
+      document.getElementById('page-add-btn')?.click();
     }
-    // Ctrl+N handled per-page after page render
+  });
+}
+
+function setupStorageUpdates(): void {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.requestpilot_history) {
+      history = (changes.requestpilot_history.newValue as HistoryEntry[] | undefined) ?? [];
+      if (currentPage === 'history' || currentPage === 'dashboard') navigateTo(currentPage);
+    }
+    if (area === 'local' && changes.requestpilot_rules) {
+      void storageService.getRules().then((updatedRules) => {
+        rules = updatedRules;
+        if (currentPage === 'dashboard') navigateTo('dashboard');
+      });
+    }
+    if (area === 'local' && changes.requestpilot_usage) {
+      void storageService.getRules().then((updatedRules) => {
+        rules = updatedRules;
+        if (currentPage === 'dashboard') navigateTo('dashboard');
+      });
+    }
   });
 }
 

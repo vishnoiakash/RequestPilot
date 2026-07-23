@@ -2,14 +2,11 @@
   "manifest_version": 3,
   "name": "RequestPilot",
   "version": "1.0.0",
-  "description": "Modify HTTP request and response headers, redirect URLs, mock APIs, and more.",
+  "description": "Create and manage HTTP header, redirect, query, cookie, API mock, and response rules.",
   "permissions": [
     "storage",
-    "declarativeNetRequest",
-    "declarativeNetRequestFeedback",
     "declarativeNetRequestWithHostAccess",
-    "tabs",
-    "scripting"
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,6 +16,13 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["dist/content/bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "ISOLATED"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["dist/content/interceptor.js"],
@@ -43,14 +47,5 @@
     "32": "assets/icons/icon32.png",
     "48": "assets/icons/icon48.png",
     "128": "assets/icons/icon128.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "dist/content/interceptor.js",
-        "assets/logo/request_pilot_logo.png"
-      ],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

@@ -35,19 +35,38 @@ async function init(): Promise<void> {
 
     masterToggle.addEventListener('change', async () => {
       const enabled = masterToggle.checked;
-      const updated = { ...settings, extensionEnabled: enabled };
-      await storageService.saveSettings(updated);
-      if (masterStatus) {
-        masterStatus.textContent = enabled ? 'All rules are running' : 'Extension is paused';
+      masterToggle.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'TOGGLE_EXTENSION',
+          enabled,
+        }) as { ok?: boolean; errors?: string[] };
+        if (!response?.ok) throw new Error(response?.errors?.join(' ') || 'Rule sync failed.');
+        settings.extensionEnabled = enabled;
+        if (masterStatus) {
+          masterStatus.textContent = enabled ? 'All rules are running' : 'Extension is paused';
+        }
+      } catch (error) {
+        masterToggle.checked = !enabled;
+        if (masterStatus) masterStatus.textContent = `Could not update: ${String(error)}`;
+      } finally {
+        masterToggle.disabled = false;
       }
     });
 
     // Environment selector
     const envSelect = document.getElementById('env-select') as HTMLSelectElement;
     const activeEnvId = environments.find((e) => e.isActive)?.id ?? '';
-    envSelect.innerHTML = environments.length
-      ? environments.map((e) => `<option value="${e.id}" ${e.id === activeEnvId ? 'selected' : ''}>${e.name}</option>`).join('')
-      : '<option value="">No environments</option>';
+    envSelect.replaceChildren();
+    if (environments.length) {
+      environments.forEach((environment) => {
+        const option = new Option(environment.name, environment.id);
+        option.selected = environment.id === activeEnvId;
+        envSelect.add(option);
+      });
+    } else {
+      envSelect.add(new Option('No environments', ''));
+    }
 
     envSelect.addEventListener('change', async () => {
       if (envSelect.value) {

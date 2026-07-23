@@ -1,9 +1,12 @@
 import type { AnyRule, HeaderRule, RedirectRule, QueryParamRule, MockApiRule, CookieRule, HeaderOperation, QueryParamOperation, CookieOperation, RuleType, Environment } from '../models/types.js';
 import { Icons } from '../utils/icons.js';
-import { generateId, resolveVariables, findUnresolvedVariables, COMMON_HEADERS } from '../utils/helpers.js';
+import { escapeHtml, generateId, resolveVariables, findUnresolvedVariables, COMMON_HEADERS } from '../utils/helpers.js';
+import { matchesUrlPattern } from '../utils/ruleMatcher.js';
+import { validateRule } from '../validation/schema.js';
 import { toast } from './Toast.js';
+import { showConfirm } from './Modal.js';
 
-type SaveCallback = (rule: AnyRule) => void;
+type SaveCallback = (rule: AnyRule) => Promise<void>;
 
 interface EditorOptions {
   rule?: AnyRule;
@@ -23,11 +26,19 @@ export class RuleEditor {
   private headerOps: HeaderOperation[] = [];
   private queryOps: QueryParamOperation[] = [];
   private cookieOps: CookieOperation[] = [];
+  private keyHandler: ((event: KeyboardEvent) => void) | null = null;
+  private previousFocus: HTMLElement | null = null;
+  private closing = false;
+  private dirty = false;
+  private confirmingClose = false;
 
   constructor(options: EditorOptions) {
     this.options = options;
     this.overlay = document.createElement('div');
     this.overlay.className = 'drawer-overlay';
+    this.overlay.setAttribute('role', 'dialog');
+    this.overlay.setAttribute('aria-modal', 'true');
+    this.overlay.setAttribute('aria-labelledby', 'rule-editor-title');
     this.drawer = document.createElement('div');
     this.drawer.className = 'drawer';
     this.overlay.appendChild(this.drawer);
@@ -39,15 +50,19 @@ export class RuleEditor {
     const ruleType = rule?.type || type || 'header';
     const isEdit = !!rule;
 
-    if (rule?.type === 'header') this.headerOps = [...(rule as HeaderRule).headers];
-    else if (rule?.type === 'queryParam') this.queryOps = [...(rule as QueryParamRule).params];
-    else if (rule?.type === 'cookie') this.cookieOps = [...(rule as CookieRule).cookies];
+    this.previousFocus = document.activeElement as HTMLElement | null;
+    if (rule?.type === 'header') this.headerOps = (rule as HeaderRule).headers.map((item) => ({ ...item }));
+    else if (rule?.type === 'mock') this.headerOps = (rule as MockApiRule).responseHeaders.map((item) => ({ ...item }));
+    else if (rule?.type === 'queryParam') this.queryOps = (rule as QueryParamRule).params.map((item) => ({ ...item }));
+    else if (rule?.type === 'cookie') this.cookieOps = (rule as CookieRule).cookies.map((item) => ({ ...item }));
     else if (ruleType === 'header') this.headerOps = [{ name: '', value: '', operation: 'set' }];
     else if (ruleType === 'queryParam') this.queryOps = [{ key: '', value: '', operation: 'set' }];
     else if (ruleType === 'cookie') this.cookieOps = [{ name: '', value: '', operation: 'set' }];
 
     this.drawer.innerHTML = this.buildHtml(ruleType, rule, environment);
     this.attachEvents(ruleType, isEdit);
+    this.drawer.addEventListener('input', () => { this.dirty = true; });
+    this.drawer.addEventListener('change', () => { this.dirty = true; });
 
     requestAnimationFrame(() => {
       this.overlay.classList.add('open');
@@ -58,19 +73,42 @@ export class RuleEditor {
     setTimeout(() => firstInput?.focus(), 300);
   }
 
-  close(): void {
+  close(force = false): void {
+    if (!force && this.dirty) {
+      if (this.confirmingClose) return;
+      this.confirmingClose = true;
+      void showConfirm({
+        title: 'Discard Unsaved Changes?',
+        body: 'Changes made in this rule editor have not been saved.',
+        confirmLabel: 'Discard',
+        variant: 'danger',
+      }).then((confirmed) => {
+        this.confirmingClose = false;
+        if (confirmed) this.close(true);
+      });
+      return;
+    }
+    if (this.closing) return;
+    this.closing = true;
+    if (this.keyHandler) document.removeEventListener('keydown', this.keyHandler);
     this.overlay.classList.remove('open');
     this.drawer.classList.remove('open');
-    setTimeout(() => this.overlay.remove(), 300);
+    setTimeout(() => {
+      this.overlay.remove();
+      this.previousFocus?.focus();
+    }, 300);
   }
 
   private buildHtml(type: RuleType, rule: AnyRule | undefined, env: Environment | null): string {
     const r = rule;
-    const name = r?.name ?? '';
+    const name = escapeHtml(r?.name ?? '');
     const enabled = r?.enabled ?? true;
-    const desc = r?.description ?? '';
+    const desc = escapeHtml(r?.description ?? '');
+    const group = escapeHtml(r?.group ?? '');
+    const tags = escapeHtml(r?.tags?.join(', ') ?? '');
     const priority = r?.priority ?? 1;
     const urlPattern = (r as HeaderRule)?.urlMatcher?.pattern ?? '';
+    const escapedUrlPattern = escapeHtml(urlPattern);
     const isRegex = (r as HeaderRule)?.urlMatcher?.isRegex ?? false;
     const typeLabel: Record<RuleType, string> = {
       header: 'Header Rule', redirect: 'Redirect Rule', queryParam: 'Query Param Rule',
@@ -78,16 +116,16 @@ export class RuleEditor {
     };
 
     const urlHint = env && urlPattern.includes('{{')
-      ? `<div class="input-hint" style="color:var(--color-primary)">Preview: ${resolveVariables(urlPattern, env)}</div>`
+      ? `<div class="input-hint" style="color:var(--color-primary)">Preview: ${escapeHtml(resolveVariables(urlPattern, env))}</div>`
       : '';
     const unresolvedVars = findUnresolvedVariables(urlPattern, env);
     const varWarning = unresolvedVars.length
-      ? `<div class="input-hint" style="color:var(--color-warning)">${Icons.alertTriangle({ size: 12 })} Unresolved: ${unresolvedVars.join(', ')}</div>`
+      ? `<div class="input-hint" style="color:var(--color-warning)">${Icons.alertTriangle({ size: 12 })} Unresolved: ${unresolvedVars.map(escapeHtml).join(', ')}</div>`
       : '';
 
     return `
       <div class="drawer-header">
-        <h2 class="drawer-title">${r ? 'Edit' : 'New'} ${typeLabel[type]}</h2>
+        <h2 class="drawer-title" id="rule-editor-title">${r ? 'Edit' : 'New'} ${typeLabel[type]}</h2>
         <button class="btn btn-ghost btn-icon" id="drawer-close" aria-label="Close">${Icons.close({ size: 18 })}</button>
       </div>
       <div class="drawer-body">
@@ -118,7 +156,7 @@ export class RuleEditor {
           <div class="form-section-title">URL Matching</div>
           <div class="input-group">
             <label class="input-label" for="rule-url">Match URL <span class="required">*</span></label>
-            <input id="rule-url" class="input" type="text" placeholder="https://api.example.com/* or {{BASE_URL}}/*" value="${urlPattern}"/>
+            <input id="rule-url" class="input" type="text" placeholder="https://api.example.com/* or {{BASE_URL}}/*" value="${escapedUrlPattern}"/>
             ${urlHint}${varWarning}
             <span class="input-error-msg" id="err-url" style="display:none">${Icons.alertTriangle({ size: 12 })} Required</span>
           </div>
@@ -126,9 +164,33 @@ export class RuleEditor {
             <input type="checkbox" id="rule-regex" ${isRegex ? 'checked' : ''}/>
             Use Regular Expression
           </label>
+          ${this.buildRequestFilters(rule, type)}
+          <div class="test-rule-panel">
+            <div class="input-group">
+              <label class="input-label" for="rule-test-url">Test this matcher</label>
+              <div style="display:flex;gap:var(--space-2)">
+                <input id="rule-test-url" class="input" type="url" placeholder="https://api.example.com/users" />
+                <select id="rule-test-method" class="select" style="width:100px">
+                  ${['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => `<option>${method}</option>`).join('')}
+                </select>
+                <button type="button" class="btn btn-secondary" id="btn-test-rule">Test</button>
+              </div>
+              <div class="input-hint" id="rule-test-result">Enter a URL to preview whether this rule matches.</div>
+            </div>
+          </div>
           ${this.buildTypeSpecificFields(type, rule)}
         </div>
         <div class="form-section">
+          <div class="form-row">
+            <div class="input-group">
+              <label class="input-label" for="rule-group">Group</label>
+              <input id="rule-group" class="input" type="text" maxlength="60" placeholder="e.g. Checkout API" value="${group}"/>
+            </div>
+            <div class="input-group">
+              <label class="input-label" for="rule-tags">Tags</label>
+              <input id="rule-tags" class="input" type="text" maxlength="160" placeholder="auth, staging, team-a" value="${tags}"/>
+            </div>
+          </div>
           <div class="input-group">
             <label class="input-label" for="rule-desc">Description</label>
             <textarea id="rule-desc" class="textarea" placeholder="Optional notes..." style="min-height:70px">${desc}</textarea>
@@ -141,6 +203,51 @@ export class RuleEditor {
         <button class="btn btn-primary" id="btn-save">${Icons.save({ size: 14 })} Save</button>
       </div>
     `;
+  }
+
+  private buildRequestFilters(rule: AnyRule | undefined, type: RuleType): string {
+    const isPageInterceptor = type === 'mock' || type === 'responseOverride';
+    const methods = rule?.urlMatcher.httpMethods ?? ['*'];
+    const resources = rule?.urlMatcher.resourceTypes ??
+      (isPageInterceptor ? ['xmlhttprequest'] : ['*']);
+    const methodOptions = ['*', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+    const allResourceOptions = [
+      ['*', 'All'],
+      ['xmlhttprequest', 'Fetch / XHR'],
+      ['document', 'Documents'],
+      ['script', 'Scripts'],
+      ['stylesheet', 'Styles'],
+      ['image', 'Images'],
+      ['font', 'Fonts'],
+      ['media', 'Media'],
+      ['websocket', 'WebSocket'],
+      ['other', 'Other'],
+    ];
+    const resourceOptions =
+      isPageInterceptor
+        ? [['xmlhttprequest', 'Fetch / XHR']]
+        : allResourceOptions;
+    return `
+      <div class="input-group">
+        <label class="input-label">HTTP Methods</label>
+        <div class="filter-chip-grid">
+          ${methodOptions.map((method) => `
+            <label class="filter-chip">
+              <input type="checkbox" name="rule-method" value="${method}" ${methods.includes(method as typeof methods[number]) ? 'checked' : ''}/>
+              <span>${method === '*' ? 'All' : method}</span>
+            </label>`).join('')}
+        </div>
+      </div>
+      <div class="input-group">
+        <label class="input-label">Resource Types</label>
+        <div class="filter-chip-grid">
+          ${resourceOptions.map(([value, label]) => `
+            <label class="filter-chip">
+              <input type="checkbox" name="rule-resource" value="${value}" ${(resources.includes(value as typeof resources[number]) || (isPageInterceptor && resources.includes('*'))) ? 'checked' : ''}/>
+              <span>${label}</span>
+            </label>`).join('')}
+        </div>
+      </div>`;
   }
 
   private buildTypeSpecificFields(type: RuleType, rule: AnyRule | undefined): string {
@@ -164,7 +271,7 @@ export class RuleEditor {
         </div>`;
     }
     if (type === 'redirect') {
-      const redirectUrl = (rule as RedirectRule)?.redirectUrl ?? '';
+      const redirectUrl = escapeHtml((rule as RedirectRule)?.redirectUrl ?? '');
       return `
         <div class="input-group">
           <label class="input-label" for="rule-redirect-url">Destination URL <span class="required">*</span></label>
@@ -189,7 +296,7 @@ export class RuleEditor {
         <div class="form-row">
           <div class="input-group">
             <label class="input-label" for="rule-status-code">Status Code</label>
-            <input id="rule-status-code" class="input" type="number" min="100" max="599" value="${mr?.statusCode ?? 200}"/>
+            <input id="rule-status-code" class="input" type="number" min="200" max="599" value="${mr?.statusCode ?? 200}"/>
           </div>
           <div class="input-group">
             <label class="input-label" for="rule-delay">Delay (ms)</label>
@@ -198,7 +305,14 @@ export class RuleEditor {
         </div>
         <div class="input-group">
           <label class="input-label" for="rule-response-body">Response Body</label>
-          <textarea id="rule-response-body" class="textarea" style="min-height:160px;font-family:var(--font-mono)">${mr?.responseBody ?? ''}</textarea>
+          <textarea id="rule-response-body" class="textarea" style="min-height:160px;font-family:var(--font-mono)">${escapeHtml(mr?.responseBody ?? '')}</textarea>
+        </div>
+        <div class="input-group">
+          <label class="input-label">Response Headers</label>
+          <div class="operations-list" id="header-ops-list">${this.renderHeaderOps()}</div>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-add-header" style="margin-top:var(--space-2);align-self:flex-start">
+            ${Icons.plus({ size: 14 })} Add Response Header
+          </button>
         </div>`;
     }
     if (type === 'responseOverride') {
@@ -210,7 +324,7 @@ export class RuleEditor {
         </div>
         <div class="input-group">
           <label class="input-label" for="rule-override-body">Override Body</label>
-          <textarea id="rule-override-body" class="textarea" style="min-height:140px;font-family:var(--font-mono)">${rr?.body ?? ''}</textarea>
+          <textarea id="rule-override-body" class="textarea" style="min-height:140px;font-family:var(--font-mono)">${escapeHtml(rr?.body ?? '')}</textarea>
         </div>`;
     }
     if (type === 'cookie') {
@@ -231,8 +345,8 @@ export class RuleEditor {
     if (!this.headerOps.length) return '';
     return this.headerOps.map((op, i) => `
       <div class="operation-row" data-index="${i}">
-        <input class="input" type="text" placeholder="Header name" value="${op.name}" data-field="name" list="header-suggestions"/>
-        <input class="input" type="text" placeholder="Value" value="${op.value}" data-field="value"/>
+        <input class="input" type="text" placeholder="Header name" value="${escapeHtml(op.name)}" data-field="name" list="header-suggestions"/>
+        <input class="input" type="text" placeholder="Value" value="${escapeHtml(op.value)}" data-field="value"/>
         <select class="select" data-field="operation">
           <option value="set" ${op.operation === 'set' ? 'selected' : ''}>Set</option>
           <option value="append" ${op.operation === 'append' ? 'selected' : ''}>Append</option>
@@ -246,11 +360,10 @@ export class RuleEditor {
     if (!this.queryOps.length) return '';
     return this.queryOps.map((op, i) => `
       <div class="operation-row param-row" data-index="${i}">
-        <input class="input" type="text" placeholder="Key" value="${op.key}" data-pfield="key"/>
-        <input class="input" type="text" placeholder="Value" value="${op.value}" data-pfield="value"/>
+        <input class="input" type="text" placeholder="Key" value="${escapeHtml(op.key)}" data-pfield="key"/>
+        <input class="input" type="text" placeholder="Value" value="${escapeHtml(op.value)}" data-pfield="value"/>
         <select class="select" data-pfield="operation">
           <option value="set" ${op.operation === 'set' ? 'selected' : ''}>Set</option>
-          <option value="append" ${op.operation === 'append' ? 'selected' : ''}>Append</option>
           <option value="remove" ${op.operation === 'remove' ? 'selected' : ''}>Remove</option>
         </select>
         <button class="btn btn-ghost btn-icon btn-sm" data-remove-param="${i}" aria-label="Remove">${Icons.trash({ size: 14 })}</button>
@@ -261,8 +374,8 @@ export class RuleEditor {
     if (!this.cookieOps.length) return '';
     return this.cookieOps.map((op, i) => `
       <div class="operation-row" data-index="${i}">
-        <input class="input" type="text" placeholder="Cookie name" value="${op.name}" data-cfield="name"/>
-        <input class="input" type="text" placeholder="Value" value="${op.value}" data-cfield="value"/>
+        <input class="input" type="text" placeholder="Cookie name" value="${escapeHtml(op.name)}" data-cfield="name"/>
+        <input class="input" type="text" placeholder="Value" value="${escapeHtml(op.value)}" data-cfield="value"/>
         <select class="select" data-cfield="operation">
           <option value="set" ${op.operation === 'set' ? 'selected' : ''}>Set</option>
           <option value="remove" ${op.operation === 'remove' ? 'selected' : ''}>Remove</option>
@@ -369,22 +482,80 @@ export class RuleEditor {
       this.refreshCookieOps();
     });
 
+    const wireExclusiveAll = (name: string) => {
+      const controls = Array.from(this.drawer.querySelectorAll<HTMLInputElement>(`[name="${name}"]`));
+      controls.forEach((control) => {
+        control.addEventListener('change', () => {
+          if (control.value === '*' && control.checked) {
+            controls.forEach((candidate) => {
+              if (candidate !== control) candidate.checked = false;
+            });
+          } else if (control.checked) {
+            const all = controls.find((candidate) => candidate.value === '*');
+            if (all) all.checked = false;
+          }
+          if (!controls.some((candidate) => candidate.checked)) {
+            const all = controls.find((candidate) => candidate.value === '*');
+            if (all) all.checked = true;
+          }
+        });
+      });
+    };
+    wireExclusiveAll('rule-method');
+    wireExclusiveAll('rule-resource');
+
+    this.drawer.querySelector('#btn-test-rule')?.addEventListener('click', () => {
+      const testUrl = this.getFormValue('rule-test-url');
+      const result = this.drawer.querySelector('#rule-test-result') as HTMLElement | null;
+      if (!result) return;
+      if (!testUrl) {
+        result.textContent = 'Enter a URL first.';
+        result.style.color = 'var(--color-warning)';
+        return;
+      }
+      const pattern = resolveVariables(this.getFormValue('rule-url'), this.options.environment);
+      const method = this.getFormValue('rule-test-method').toUpperCase();
+      const selectedMethods = this.getCheckedValues('rule-method');
+      const methodMatches = selectedMethods.includes('*') || selectedMethods.includes(method);
+      const urlMatches = matchesUrlPattern(pattern, this.getChecked('rule-regex'), testUrl);
+      const matched = urlMatches && methodMatches;
+      result.textContent = matched
+        ? 'Match: this request will be targeted.'
+        : `No match: ${urlMatches ? 'the HTTP method is excluded' : 'the URL pattern does not match'}.`;
+      result.style.color = matched ? 'var(--color-success)' : 'var(--color-error)';
+    });
+
     this.overlay.addEventListener('click', (e) => {
       if (e.target === this.overlay) this.close();
     });
 
-    this.drawer.querySelector('#btn-save')?.addEventListener('click', () => this.handleSave(type, false));
-    this.drawer.querySelector('#btn-save-dup')?.addEventListener('click', () => this.handleSave(type, true));
+    this.drawer.querySelector('#btn-save')?.addEventListener('click', () => void this.handleSave(type, false));
+    this.drawer.querySelector('#btn-save-dup')?.addEventListener('click', () => void this.handleSave(type, true));
 
     // Ctrl+S shortcut
-    const keyHandler = (e: KeyboardEvent) => {
+    this.keyHandler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        this.handleSave(type, false);
+        void this.handleSave(type, false);
       }
-      if (e.key === 'Escape') { this.close(); document.removeEventListener('keydown', keyHandler); }
+      if (e.key === 'Escape') this.close();
+      if (e.key === 'Tab') {
+        const focusable = Array.from(this.drawer.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )).filter((element) => element.offsetParent !== null);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
-    document.addEventListener('keydown', keyHandler);
+    document.addEventListener('keydown', this.keyHandler);
   }
 
   private getFormValue(id: string): string {
@@ -395,12 +566,17 @@ export class RuleEditor {
     return (this.drawer.querySelector(`#${id}`) as HTMLInputElement)?.checked ?? false;
   }
 
+  private getCheckedValues(name: string): string[] {
+    return Array.from(this.drawer.querySelectorAll<HTMLInputElement>(`[name="${name}"]:checked`))
+      .map((input) => input.value);
+  }
+
   private showError(id: string, show: boolean): void {
     const el = this.drawer.querySelector(`#${id}`) as HTMLElement | null;
     if (el) el.style.display = show ? 'flex' : 'none';
   }
 
-  private handleSave(type: RuleType, duplicate: boolean): void {
+  private async handleSave(type: RuleType, duplicate: boolean): Promise<void> {
     // Read current values from form
     this.syncOpsFromDOM();
 
@@ -441,13 +617,19 @@ export class RuleEditor {
       enabled: this.getChecked('rule-enabled'),
       priority: parseInt(this.getFormValue('rule-priority') || '1'),
       description: this.getFormValue('rule-desc'),
+      group: this.getFormValue('rule-group') || undefined,
+      tags: this.getFormValue('rule-tags')
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+        .slice(0, 10),
       createdAt: this.options.rule?.createdAt ?? now,
       updatedAt: now,
       urlMatcher: {
         pattern: url,
         isRegex: this.getChecked('rule-regex'),
-        resourceTypes: ['*' as const],
-        httpMethods: ['*' as const],
+        resourceTypes: this.getCheckedValues('rule-resource') as AnyRule['urlMatcher']['resourceTypes'],
+        httpMethods: this.getCheckedValues('rule-method') as AnyRule['urlMatcher']['httpMethods'],
       },
     };
 
@@ -464,7 +646,7 @@ export class RuleEditor {
         ...base, type: 'mock',
         statusCode: parseInt(this.getFormValue('rule-status-code') || '200'),
         responseBody: (this.drawer.querySelector('#rule-response-body') as HTMLTextAreaElement)?.value ?? '',
-        responseHeaders: [],
+        responseHeaders: this.headerOps,
         delay: parseInt(this.getFormValue('rule-delay') || '0'),
       } as MockApiRule;
     } else if (type === 'cookie') {
@@ -478,15 +660,41 @@ export class RuleEditor {
       } as AnyRule;
     }
 
-    this.options.onSave(rule);
-    toast.success('Rule saved successfully');
-
-    if (duplicate) {
-      const copy: AnyRule = { ...rule, id: generateId(), name: `${rule.name} (Copy)`, enabled: false } as AnyRule;
-      this.options.onSave(copy);
+    const validation = validateRule(rule);
+    if (!validation.valid) {
+      toast.error('Rule is not valid', validation.errors[0]);
+      return;
+    }
+    const unresolved = findUnresolvedVariables(JSON.stringify(rule), this.options.environment);
+    if (rule.enabled && unresolved.length) {
+      toast.error(
+        'Enabled rule has unresolved variables',
+        `Define ${Array.from(new Set(unresolved)).join(', ')} in the active environment or save the rule disabled.`
+      );
+      return;
     }
 
-    this.close();
+    const saveButtons = Array.from(this.drawer.querySelectorAll<HTMLButtonElement>('#btn-save, #btn-save-dup'));
+    saveButtons.forEach((button) => { button.disabled = true; });
+    try {
+      await this.options.onSave(rule);
+      if (duplicate) {
+        const copy: AnyRule = {
+          ...rule,
+          id: generateId(),
+          name: `${rule.name} (Copy)`,
+          enabled: false,
+          createdAt: now,
+          updatedAt: now,
+        } as AnyRule;
+        await this.options.onSave(copy);
+      }
+      toast.success(duplicate ? 'Rule saved and duplicated' : 'Rule saved successfully');
+      this.close(true);
+    } catch (error) {
+      toast.error('Rule could not be saved', String(error));
+      saveButtons.forEach((button) => { button.disabled = false; });
+    }
   }
 
   private syncOpsFromDOM(): void {

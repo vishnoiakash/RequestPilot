@@ -56,6 +56,12 @@ npm run build
 
 # Watch mode (recompiles TypeScript on save)
 npm run watch
+
+# Build and run automated checks
+npm run check
+
+# Create a clean store upload ZIP
+npm run package
 ```
 
 After any change, go to `edge://extensions/` and click the **reload** icon on the RequestPilot card.
@@ -79,7 +85,8 @@ RequestPilot/
 │   ├── icons/             # Extension icons (PNG, all sizes)
 │   └── logo/              # Source logo
 ├── scripts/
-│   └── copy-assets.js     # Post-build asset copy script
+│   ├── copy-assets.cjs    # Post-build asset copy script
+│   └── package-release.cjs # Store ZIP creator
 ├── dist/                  # Compiled output (generated — do not edit)
 ├── manifest.json
 ├── package.json
@@ -94,7 +101,7 @@ RequestPilot/
 These use the browser's native [`declarativeNetRequest`](https://developer.chrome.com/docs/extensions/reference/declarativeNetRequest/) API. Rules are compiled and applied as dynamic DNR rules every time you save or toggle a rule. No page reload required — changes take effect on the next matching request.
 
 ### Mock API & Response Override
-These run via a content script (`interceptor.js`) injected at `document_start` in the page's `MAIN` world. It wraps `window.fetch` and `window.XMLHttpRequest` before any page scripts run, intercepting matching requests and returning synthetic responses.
+These use a two-part content-script architecture. An isolated-world bridge reads extension storage and sends minimal validated configuration to a `MAIN`-world interceptor that wraps `window.fetch` and `window.XMLHttpRequest`. The page never receives extension API access.
 
 ### Environment Variables
 Use `{{KEY}}` placeholders in any rule field. The active environment's variables are resolved before rules are applied. Switch environments from the popup or the Environments page.
@@ -106,12 +113,9 @@ Use `{{KEY}}` placeholders in any rule field. The active environment's variables
 | Permission | Why |
 |---|---|
 | `storage` | Persist rules, settings, environments, history |
-| `declarativeNetRequest` | Modify headers, redirect URLs, transform query params |
-| `declarativeNetRequestFeedback` | Log which rules fired (History page) |
 | `declarativeNetRequestWithHostAccess` | Apply dynamic rules to all URLs |
-| `tabs` | Notify content scripts when rules change |
-| `scripting` | Reserved for future programmatic injection |
-| `<all_urls>` host permission | Intercept requests on any website |
+| `webRequest` | Observe request metadata for local history in packaged/store builds; it never blocks or changes requests |
+| `<all_urls>` host permission | Apply user-created rules on the sites selected by the user |
 
 ---
 
@@ -139,3 +143,7 @@ Use `{{KEY}}` placeholders in any rule field. The active environment's variables
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+## Privacy
+
+RequestPilot does not transmit request data or configurations to a remote service. See [PRIVACY.md](PRIVACY.md) for the complete disclosure used for store submission.
